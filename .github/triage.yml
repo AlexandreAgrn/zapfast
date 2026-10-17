@@ -85,6 +85,11 @@ instructions: |
   Never infer an antivirus false positive from a detection name, unsigned
   binary, or source code. Ask for the flagged artifact's SHA-256 when missing.
   Never recommend restoring quarantine, disabling protection, or exclusions.
+  A Windows "unknown publisher", "Windows protected your PC", or "couldn't
+  confirm the creator" prompt, or a macOS Gatekeeper prompt, is the operating
+  system's warning for an unsigned or newly downloaded app, not an antivirus
+  detection. Select docs/_guide/download.md (https://zapfast.rocks/download/),
+  which explains More info, then Run anyway, and do not ask for a SHA-256.
 
   When a report includes a screenshot that may show real conversations, contact
   names, or phone numbers, ask the reporter to crop or redact it.
