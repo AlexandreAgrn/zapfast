@@ -7,6 +7,10 @@ on:
         description: Preview without writing comments, labels, or closures
         type: boolean
         default: false
+      quiet:
+        description: Write only to the project board, without comments, labels, or closures
+        type: boolean
+        default: true
       limit:
         description: Maximum number of open reports to assess (1-100)
         required: false
@@ -67,7 +71,9 @@ jobs:
           github-token: ${{ github.token }}
           kind: ${{ matrix.kind }}
           number: ${{ matrix.number }}
+          project-token: ${{ secrets.TRIAGE_PROJECT_TOKEN }}
           dry-run: ${{ inputs.dry_run }}
+          quiet: ${{ inputs.quiet }}
           debounce-seconds: 0
       - if: steps.first_attempt.outcome == 'failure'
         uses: crmne/copilot-triage@v0
@@ -76,5 +82,7 @@ jobs:
           github-token: ${{ github.token }}
           kind: ${{ matrix.kind }}
           number: ${{ matrix.number }}
+          project-token: ${{ secrets.TRIAGE_PROJECT_TOKEN }}
           dry-run: ${{ inputs.dry_run }}
+          quiet: ${{ inputs.quiet }}
           debounce-seconds: 0
