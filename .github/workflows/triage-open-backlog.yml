@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
-      fail-fast: true
+      fail-fast: false
       max-parallel: 1
       matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
     steps:
@@ -68,6 +68,7 @@ jobs:
         uses: crmne/copilot-triage@v0
         with:
           copilot-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          fallback-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           github-token: ${{ github.token }}
           kind: ${{ matrix.kind }}
           number: ${{ matrix.number }}
@@ -79,6 +80,7 @@ jobs:
         uses: crmne/copilot-triage@v0
         with:
           copilot-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          fallback-api-key: ${{ secrets.OPENROUTER_API_KEY }}
           github-token: ${{ github.token }}
           kind: ${{ matrix.kind }}
           number: ${{ matrix.number }}
