@@ -703,6 +703,8 @@ pub struct VideoPipeline {
     /// statistics after the standard report block, whose fields are not decoded yet. Logged so a
     /// call's numbers can be set beside what we know we sent.
     report_extension: Vec<u8>,
+    /// The peer's latest interarrival jitter for our video, in the 90 kHz clock, for the log.
+    peer_jitter: Option<u32>,
 }
 
 impl VideoPipeline {
@@ -746,6 +748,7 @@ impl VideoPipeline {
                 rate_share,
                 feedback: Default::default(),
                 report_extension: Vec::new(),
+                peer_jitter: None,
             },
             tick_rx,
         ))
@@ -1360,6 +1363,10 @@ fn log_rate_change(call_id: &str, change: RateChange) {
         Reason::SendDrops => "video was dropped before it was sent".to_owned(),
         Reason::CaptureDrops => "camera frames backed up before the engine".to_owned(),
         Reason::Estimate(bitrate) => format!("the peer can take {} kbps", bitrate / 1000),
+        Reason::Delay(queued) => format!(
+            "the round trip stood {} ms above its shortest",
+            queued.as_millis()
+        ),
     };
     let level = if change.from.tier != change.to.tier || change.reason != Reason::Clean {
         log::Level::Info
@@ -2512,6 +2519,30 @@ impl Call {
                 {
                     pipe.report_extension.clone_from(&block.profile_extension);
                 }
+                if *reports_video
+                    && !*reports_audio
+                    && let Some(block) = report_blocks.first()
+                {
+                    pipe.peer_jitter = Some(block.jitter);
+                }
+                // Every block answering one of our sender reports measures the same path, audio's
+                // as well as video's; the shortest is the one least held up on the way.
+                let now = crate::video_rate::ntp_middle(std::time::SystemTime::now());
+                let round_trip = report_blocks
+                    .iter()
+                    .filter_map(|block| {
+                        crate::video_rate::round_trip(
+                            block.last_sender_report,
+                            block.delay_since_last_sender_report,
+                            now,
+                        )
+                    })
+                    .min();
+                if let Some(round_trip) = round_trip
+                    && let Some(change) = pipe.rate.on_round_trip(round_trip, Instant::now())
+                {
+                    log_rate_change(&self.call_id, change);
+                }
                 let blocks: Vec<(u32, u8)> = report_blocks
                     .iter()
                     .map(|block| (block.ssrc, block.fraction_lost))
@@ -2590,10 +2621,15 @@ impl Call {
         if let Some(pipe) = &self.video_pipe {
             let rate = pipe.rate();
             let feedback = pipe.feedback;
+            let (round_trip, floor) = pipe.rate.round_trips();
+            let millis = |time: Option<std::time::Duration>| {
+                time.map_or_else(|| "none".to_owned(), |time| time.as_millis().to_string())
+            };
             log::info!(
                 "[CALL] video send call_id={} at={} bitrate_kbps={} picture={} max_fps={} \
                  peer_nacked_packets={} peer_plis={} peer_firs={} peer_estimates={} \
-                 peer_estimate_kbps={} peer_report_extension={}",
+                 peer_estimate_kbps={} rtt_ms={} rtt_floor_ms={} peer_jitter_ms={} \
+                 peer_report_extension={}",
                 self.call_id,
                 marker,
                 rate.bitrate / 1000,
@@ -2606,6 +2642,10 @@ impl Call {
                 feedback
                     .last_estimate
                     .map_or_else(|| "none".to_owned(), |bps| (bps / 1000).to_string()),
+                millis(round_trip),
+                millis(floor),
+                pipe.peer_jitter
+                    .map_or_else(|| "none".to_owned(), |ticks| (ticks / 90).to_string()),
                 crate::settings::hex(&pipe.report_extension),
             );
         }
@@ -3199,6 +3239,7 @@ mod tests {
             rate_share,
             feedback: Default::default(),
             report_extension: Vec::new(),
+            peer_jitter: None,
         }
     }
 
