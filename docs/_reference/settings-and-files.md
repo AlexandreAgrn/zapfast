@@ -196,7 +196,9 @@ name or description, in the interface language or in English.
 - **Start at login**: start in the tray without a window, where the platform
   supports it. If the desktop's tray is not up yet, ZapFast waits up to 30
   seconds for it, then opens the window, since a desktop without a tray could
-  not bring it back.
+  not bring it back. On macOS this is a login item under System Settings >
+  General > Login Items, which macOS may ask you to allow there; inside a
+  Flatpak the desktop's background portal asks first.
 - **Check for updates**: ask GitHub once a day whether a newer release exists.
 - **Download updates automatically**: download and verify a new release in the
   background; restarting stays your choice. Package managers and Flatpak update

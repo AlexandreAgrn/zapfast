@@ -760,6 +760,8 @@ pub struct App {
     pub call_member_textures: HashMap<String, CallTexture>,
     /// Whether ZapFast starts at login, when this installation supports it.
     pub start_with_system: Option<bool>,
+    /// The read or change of the login item running on its thread.
+    login_item: crate::autostart::LoginItem,
     /// Cross-thread window repaint handle.
     waker: Waker,
     tray: Option<fastframe_tray::Tray>,
@@ -1194,9 +1196,8 @@ impl App {
                 app.settings.keep_chats_archived,
             ));
         }
-        if crate::autostart::supported() {
-            app.start_with_system = Some(crate::autostart::enabled());
-        }
+        let login_waker = waker.clone();
+        app.login_item.read(move || login_waker.wake());
         let _ = app.roster.save_to(&app.files, &app.dirs.accounts_file());
         Ok(app)
     }
@@ -1468,6 +1469,7 @@ impl App {
             call_member_frames: HashMap::new(),
             call_member_textures: HashMap::new(),
             start_with_system: None,
+            login_item: Default::default(),
             waker,
             tray: None,
             power: fastframe_power::Power::fixed(Default::default()),
@@ -8136,10 +8138,10 @@ impl App {
                     account.backend.send(Command::SetProxy(value.clone()));
                 }
             }
-            Action::SetStartWithSystem(enabled) => match crate::autostart::set(enabled) {
-                Ok(()) => self.start_with_system = Some(crate::autostart::enabled()),
-                Err(error) => self.toast_error(format!("Could not change the login item: {error}")),
-            },
+            Action::SetStartWithSystem(enabled) => {
+                let waker = self.waker.clone();
+                self.login_item.set(enabled, move || waker.wake());
+            }
             Action::ZoomBy(delta) => {
                 self.settings.zoom = (self.settings.zoom + delta).clamp(0.6, 2.0);
                 self.zoom_applied = false;
@@ -8438,6 +8440,7 @@ impl App {
             self.window_focused = false;
         }
         self.tick_app_lock(ctx);
+        self.tick_login_item();
         // Nobody reads behind the lock screen: messages stay unread, the
         // phone keeps notifying, and notifications here say nothing.
         if self.app_lock.is_locked() {
@@ -8515,6 +8518,27 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
                 egui::UserAttentionType::Informational,
             ));
+        }
+    }
+
+    /// Collects a finished read or change of the login item.
+    fn tick_login_item(&mut self) {
+        let Some(outcome) = self.login_item.poll() else {
+            return;
+        };
+        match outcome.state {
+            Ok(state) => {
+                self.start_with_system = crate::autostart::switch(state);
+                if outcome.changed && matches!(state, fastframe_autostart::State::NeedsApproval(_))
+                {
+                    self.toast("Allow ZapFast in System Settings, under Login Items.");
+                }
+            }
+            Err(error) => {
+                if outcome.changed {
+                    self.toast_error(format!("Could not change the login item: {error}"));
+                }
+            }
         }
     }
 
