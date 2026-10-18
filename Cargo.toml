@@ -118,15 +118,17 @@ openh264 = "0.9"
 # which openh264 does not wrap. Already included through openh264.
 openh264-sys2 = { version = "0.9", default-features = false }
 mp4 = "0.14"
-# The crmne/rodio fork (branch `zapfast`): upstream's master plus
-# MicrophoneBuilder::with_error_callback (RustAudio/rodio#931), so a
-# microphone's stream errors reach `audio::Health` instead of stderr (#507).
-# Master also carries what no release has yet: RustAudio/rodio#833, without
-# which a video with a picture and a sound track plays a tenth of a second of
-# its sound (0.23.0 was cut from the 0.22 branch without it), and cpal 0.18,
-# whose ALSA backend recovers from an underrun instead of reporting POLLERR in
-# a loop (RustAudio/cpal#1122). Drop the pin at the first release with both.
-rodio = { git = "https://github.com/crmne/rodio", rev = "742090d57a4c83b23bd990ba0dcf939d09dbeb94", default-features = false, features = ["playback", "recording", "mp3", "mp4", "wav", "vorbis"] }
+# rodio decodes and mixes; fastframe-audio plays and records, so neither of
+# rodio's own device features is on. The crmne/rodio fork (branch `zapfast`)
+# is upstream's master, which carries what no release has yet:
+# RustAudio/rodio#833 (https://github.com/RustAudio/rodio/pull/833), without
+# which an MP4 with a picture and a sound track plays a tenth of a second of
+# its sound (0.23.0 was cut from the 0.22 branch without it). Drop the pin at
+# the first release with it.
+rodio = { git = "https://github.com/crmne/rodio", rev = "742090d57a4c83b23bd990ba0dcf939d09dbeb94", default-features = false, features = ["mp3", "mp4", "wav", "vorbis"] }
+# The ring a microphone's samples cross from the audio thread to the reader,
+# which never waits or allocates on the audio thread. Already in the tree.
+rtrb = "0.3"
 # rodio's own copy, named to decode a video's AAC track that `mp4` reads:
 # symphonia 0.5's MP4 reader refuses the sound of WhatsApp's videos (#265).
 symphonia = { version = "0.5.5", default-features = false, features = ["aac"] }

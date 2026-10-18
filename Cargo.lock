@@ -5910,9 +5910,7 @@ name = "rodio"
 version = "0.22.2"
 source = "git+https://github.com/crmne/rodio?rev=742090d57a4c83b23bd990ba0dcf939d09dbeb94#742090d57a4c83b23bd990ba0dcf939d09dbeb94"
 dependencies = [
- "cpal",
  "dasp_sample",
- "rtrb",
  "rubato",
  "symphonia",
  "thiserror 2.0.20",
@@ -8863,6 +8861,7 @@ dependencies = [
  "rfd",
  "ring",
  "rodio",
+ "rtrb",
  "rusqlite",
  "serde",
  "serde_json",

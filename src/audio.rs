@@ -26,10 +26,10 @@ fn rate() -> NonZero<u32> {
     NonZero::new(voice::RATE).expect("48 kHz is not zero")
 }
 
-pub(crate) mod health;
+mod microphone;
 mod output;
 
-pub use health::Health;
+pub use microphone::{Microphone, microphones};
 pub(crate) use output::MixOutput;
 pub use output::{Output, open_output};
 
@@ -774,29 +774,19 @@ fn record(
 }
 
 /// Opens the default microphone, with its channel count and sample rate.
-fn open_microphone() -> Result<(rodio::microphone::Microphone, u16, u32), String> {
-    let microphone = rodio::microphone::MicrophoneBuilder::new()
-        .with_error_callback(Health::new("voice recording").callback())
-        .default_device()
-        .map_err(|error| format!("No microphone available: {error}"))?
-        .default_config()
-        .map_err(|error| format!("The microphone has no supported format: {error}"))?
-        .open_stream()
-        .map_err(|error| format!("Could not open the microphone: {error}"))?;
-    let channels = microphone.channels().get();
-    let rate = microphone.sample_rate().get();
+fn open_microphone() -> Result<(Microphone, u16, u32), String> {
+    let microphone = Microphone::open(fastframe_audio::Device::Default, "voice recording")?;
+    let channels = microphone.channels();
+    let rate = microphone.rate();
     Ok((microphone, channels, rate))
 }
 
 /// Records from the microphone `open` returns, as mono 48 kHz samples.
 ///
-/// A read from rodio's microphone waits until a sample arrives, so the
-/// microphone is opened and read on a thread of its own and this one waits
-/// for it with a timeout: a device that stalls without reporting an error
-/// cannot keep a stop or the stall limit from ending the recording. A read
-/// still stuck then is left to finish on its own, keeping the device open
-/// until a sample or an error arrives; only an interruptible read in rodio
-/// itself would avoid that.
+/// The microphone is opened and read on a thread of its own, which may wait
+/// for the device to open, and this one waits for it with a timeout: a
+/// device that stalls without reporting an error cannot keep a stop or the
+/// stall limit from ending the recording.
 fn record_from<M: Iterator<Item = f32>>(
     open: impl FnOnce() -> Result<(M, u16, u32), String> + Send + 'static,
     stalled: Duration,
@@ -857,9 +847,8 @@ fn chunk_len(channels: u16, rate: u32) -> usize {
 
 /// How long the microphone may go without a sample before the recording ends.
 ///
-/// Once the stream has reported any error, a recoverable overrun included,
-/// rodio's reads come back empty whenever its buffer runs dry, so an empty
-/// read alone does not mean the device is gone (#382).
+/// A read comes back empty whenever the microphone has captured nothing
+/// new, so an empty read alone does not mean the device is gone (#382).
 const STALLED_MICROPHONE: Duration = Duration::from_secs(1);
 
 /// How often a wait for the microphone looks at the stop and stall limits.
@@ -1017,8 +1006,7 @@ mod tests {
 
     #[test]
     fn a_stream_error_that_recovers_does_not_end_the_recording() {
-        // rodio returns None while its buffer is empty once any stream error,
-        // even a recoverable overrun, has been reported (#382).
+        // A microphone answers None while nothing new has arrived (#382).
         let done = AtomicBool::new(false);
         let mut microphone = Script {
             reads: [Some(0.1), Some(0.2), None, Some(0.3), Some(0.4)].into(),
