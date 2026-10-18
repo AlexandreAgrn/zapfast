@@ -437,7 +437,13 @@ fn deliver(
         Client::new(
             App::new("me.paolino.zapfast", "ZapFast")
                 .desktop_entry("zapfast")
-                .icon("zapfast"),
+                .icon("zapfast")
+                // ZapFast's green, the theme's accent, behind the logo on
+                // Windows toasts, so Windows 11's dark theme leaves it as drawn.
+                .logo(
+                    include_bytes!("../packaging/macos/icon-1024.png"),
+                    [0x00, 0xa8, 0x84],
+                ),
         )
     }) {
         Ok(client) => client,
