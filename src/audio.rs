@@ -27,71 +27,11 @@ fn rate() -> NonZero<u32> {
 }
 
 pub(crate) mod health;
+mod output;
 
 pub use health::Health;
-
-/// An open output device, with what its stream has reported.
-pub struct Output {
-    sink: rodio::MixerDeviceSink,
-    health: Health,
-}
-
-impl Output {
-    pub fn mixer(&self) -> &rodio::mixer::Mixer {
-        self.sink.mixer()
-    }
-
-    /// The device itself, for an owner that keeps the health apart.
-    pub fn into_sink(self) -> rodio::MixerDeviceSink {
-        self.sink
-    }
-
-    /// Whether the stream keeps failing: drop this and open another.
-    pub fn failed(&self) -> bool {
-        self.health.failed()
-    }
-}
-
-/// Opens the default output device for playback, reporting its stream's
-/// errors to `health` (#507).
-///
-/// rodio reports the sink's drop and every stream error through `stderr` by
-/// default. A desktop launch can have that closed: ZapFast inherits `stderr`
-/// from whatever started it, and that process can exit while ZapFast runs on.
-/// Rust ignores `SIGPIPE`, so the next write there fails with `Broken pipe`
-/// and the print macro panics, which aborts the whole app in a release build.
-/// Keep it off, and report failures of our own through the log instead.
-///
-/// This is rodio's `open_default_sink` with our error callback: the default
-/// device, else the first other device (not the null one) that opens.
-pub fn open_output(health: Health) -> Result<Output, rodio::DeviceSinkError> {
-    use rodio::cpal::traits::{DeviceTrait, HostTrait};
-    let opened = rodio::DeviceSinkBuilder::from_default_device()
-        .and_then(|builder| builder.with_error_callback(health.callback()).open_stream());
-    let mut sink = opened.or_else(|original| {
-        let Ok(devices) = rodio::cpal::default_host().output_devices() else {
-            return Err(original);
-        };
-        devices
-            .filter(|device| {
-                device
-                    .description()
-                    .is_ok_and(|about| about.driver().is_some_and(|driver| driver != "null"))
-            })
-            .find_map(|device| {
-                rodio::DeviceSinkBuilder::from_device(device)
-                    .and_then(|builder| {
-                        builder
-                            .with_error_callback(health.callback())
-                            .open_sink_or_fallback()
-                    })
-                    .ok()
-            })
-            .ok_or(original)
-    })?;
-    sink.log_on_drop(false);
-    Ok(Output { sink, health })
-}
+pub(crate) use output::MixOutput;
+pub use output::{Output, open_output};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -585,9 +525,7 @@ impl Player {
         let offset = ((fraction.clamp(0.0, 1.0) * buffer.len() as f32) as usize).min(buffer.len());
         if self.output.is_none() {
             let waker = self.waker.clone();
-            let health = Health::waking("voice playback", move || waker.wake());
-            let device =
-                open_output(health).map_err(|error| format!("No sound output: {error}"))?;
+            let device = open_output(Some(Arc::new(move || waker.wake())))?;
             let sink = rodio::Player::connect_new(device.mixer());
             self.output = Some((device, sink));
         }

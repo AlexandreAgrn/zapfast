@@ -470,7 +470,7 @@ call screen says so. Cameras come through Video4Linux on Linux, AVFoundation on
 macOS (which asks once for permission), and Media Foundation on Windows. The
 Flatpak is allowed its devices for this, since Flatpak has no narrower
 permission for cameras.
-Calls use your platform's own audio (PipeWire or ALSA on Linux, Core Audio on
+Calls use your platform's own audio (PipeWire, PulseAudio or ALSA on Linux, Core Audio on
 macOS, WASAPI on Windows), with no echo cancellation of their own: use
 headphones, or your system's echo cancellation, when the speaker is loud.
 

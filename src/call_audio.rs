@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 
 use rodio::Source;
 use rodio::buffer::SamplesBuffer;
-use rodio::cpal::traits::{DeviceTrait, HostTrait};
 
 /// The engine's audio clock: 16 kHz mono.
 pub const RATE: u32 = 16_000;
@@ -218,37 +217,31 @@ pub fn microphones() -> Vec<(String, String)> {
     }
 }
 
-/// The speakers the platform reports, as `(name, label)`.
+/// The speakers the platform reports, as `(id, label)`.
 ///
-/// A device that exists only to swallow sound (ALSA's `null`, which rodio's own listing hides) is
-/// left out: offering it would let a call send the peer's voice nowhere.
+/// The id is the system's own for the device (fastframe-audio's `DeviceId`), which stays the same
+/// when the device is renamed and tells apart two with the same name. Devices that only swallow
+/// sound (ALSA's `null`) are not listed.
 pub fn speakers() -> Vec<(String, String)> {
-    let devices = match rodio::cpal::default_host().output_devices() {
-        Ok(devices) => devices,
+    match fastframe_audio::output_devices() {
+        Ok(devices) => dedupe(
+            devices
+                .into_iter()
+                .map(|device| {
+                    let label = if device.name.is_empty() {
+                        "Speaker".to_owned()
+                    } else {
+                        device.name
+                    };
+                    (device.id.as_str().to_owned(), label)
+                })
+                .collect(),
+        ),
         Err(error) => {
             log::warn!("[CALL] the output device list could not be read: {error}");
-            return Vec::new();
+            Vec::new()
         }
-    };
-    dedupe(
-        devices
-            .filter(|device| {
-                device
-                    .description()
-                    .map(|description| description.driver() != Some("null"))
-                    .unwrap_or(true)
-            })
-            .filter_map(|device| {
-                let name = device.description().ok()?.name().to_string();
-                let label = if name.is_empty() {
-                    "Speaker".to_owned()
-                } else {
-                    name.clone()
-                };
-                Some((name, label))
-            })
-            .collect(),
-    )
+    }
 }
 
 /// Keeps one entry per name, in label order, which is what a picker wants.
@@ -289,19 +282,14 @@ fn input_available(selected: Option<&str>) -> bool {
 
 /// Whether the speaker a call would really open can be had.
 fn output_available(selected: Option<&str>) -> bool {
-    let listed: Option<Vec<String>> =
-        rodio::cpal::default_host()
-            .output_devices()
-            .ok()
-            .map(|devices| {
-                devices
-                    .into_iter()
-                    .filter_map(|device| device.description().ok().map(|d| d.name().to_owned()))
-                    .collect()
-            });
-    chosen_available(selected, listed.as_deref(), || {
-        rodio::DeviceSinkBuilder::from_default_device().is_ok()
-    })
+    let listed: Option<Vec<String>> = fastframe_audio::output_devices().ok().map(|devices| {
+        devices
+            .into_iter()
+            .map(|device| device.id.as_str().to_owned())
+            .collect()
+    });
+    let any = listed.as_ref().is_some_and(|ids| !ids.is_empty());
+    chosen_available(selected, listed.as_deref(), || any)
 }
 
 /// Whether the device a call would open can be had: the one the user picked, or the system default
@@ -403,13 +391,15 @@ fn open_microphone(device: Option<&str>) -> Result<Mic, String> {
         .map_err(|error| format!("the microphone could not be opened: {error}"))
 }
 
-/// An open speaker. The sink has to outlive the player queued on it, or the stream closes with it.
+/// An open speaker: an output of the call's own, on the device the call picked, and the player
+/// queued on its mixer.
 enum Sink {
     Real {
-        _device: rodio::MixerDeviceSink,
-        health: crate::audio::Health,
+        output: Box<crate::audio::MixOutput>,
         player: rodio::Player,
         layout: Layout,
+        /// Set once the output lost what it was playing, so the writer reopens it.
+        lost: bool,
     },
     /// Installed only by a test, and only while its guard lives.
     #[cfg(test)]
@@ -421,46 +411,33 @@ fn open_sink(device: Option<&str>) -> Result<Sink, String> {
     if let Some(speaker) = fake::open_speaker(device) {
         return Ok(Sink::Fake(speaker));
     }
-    let health = crate::audio::Health::new("call speaker");
-    let sink = match device {
-        Some(name) => {
-            let output = rodio::cpal::default_host()
-                .output_devices()
-                .map_err(|error| format!("the output devices could not be listed: {error}"))?
-                .find(|device| {
-                    device
-                        .description()
-                        .ok()
-                        .is_some_and(|description| description.name() == name)
-                })
-                .ok_or_else(|| format!("the speaker {name} is not available"))?;
-            rodio::DeviceSinkBuilder::from_device(output)
-                .map_err(|error| format!("the speaker {name} could not be used: {error}"))?
-                .with_error_callback(health.callback())
-                .open_stream()
-                .map_err(|error| format!("the speaker {name} could not be opened: {error}"))?
+    let target = match device {
+        Some(id) => {
+            // fastframe-audio plays the default when an id matches nothing; the call wants to
+            // know, so it can say the device it picked is gone.
+            let listed = fastframe_audio::output_devices()
+                .map_err(|error| format!("the output devices could not be listed: {error}"))?;
+            if !listed.iter().any(|device| device.id.as_str() == id) {
+                return Err(format!("the speaker {id} is not available"));
+            }
+            fastframe_audio::Device::Id(fastframe_audio::DeviceId::new(id))
         }
-        None => crate::audio::open_output(health.clone())
-            .map_err(|error| format!("no speaker is available: {error}"))?
-            .into_sink(),
+        None => fastframe_audio::Device::Default,
     };
-    Ok(Sink::real(sink, health))
+    let output = crate::audio::MixOutput::open(target, None)
+        .map_err(|error| format!("the speaker could not be opened: {error}"))?;
+    Ok(Sink::real(output))
 }
 
 impl Sink {
-    fn real(mut sink: rodio::MixerDeviceSink, health: crate::audio::Health) -> Self {
-        // Its drop notice goes to stderr, which may be closed (see `audio::open_output`).
-        sink.log_on_drop(false);
-        let layout = Layout {
-            rate: sink.config().sample_rate().get(),
-            channels: sink.config().channel_count().get(),
-        };
-        let player = rodio::Player::connect_new(sink.mixer());
+    fn real(output: crate::audio::MixOutput) -> Self {
+        let (rate, channels) = output.format();
+        let player = rodio::Player::connect_new(output.mixer());
         Sink::Real {
-            _device: sink,
-            health,
+            output: Box::new(output),
             player,
-            layout,
+            layout: Layout { rate, channels },
+            lost: false,
         }
     }
 
@@ -498,10 +475,14 @@ impl Sink {
         }
     }
 
-    /// Whether the stream keeps failing (#507), so the writer reopens it.
-    fn failed(&self) -> bool {
+    /// Whether the stream lost what it plays (#507), so the writer reopens it. Keeps the output on
+    /// a working device on the way, so it is asked for each frame.
+    fn failed(&mut self) -> bool {
         match self {
-            Sink::Real { health, .. } => health.failed(),
+            Sink::Real { output, lost, .. } => {
+                *lost |= output.maintain("call speaker").lost;
+                *lost
+            }
             #[cfg(test)]
             Sink::Fake(speaker) => speaker.failed(),
         }
@@ -1115,7 +1096,7 @@ fn write_speaker(
         stalled,
         played,
     } = flags;
-    let sink = match open_sink(device) {
+    let mut sink = match open_sink(device) {
         Ok(sink) => {
             let _ = ready.send(Ok(()));
             sink
