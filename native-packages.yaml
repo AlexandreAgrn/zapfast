@@ -1,8 +1,8 @@
-# Shared CLI: gem install native-packages --version 0.9.0
+# Shared CLI: gem install native-packages --version 0.10.0
 ---
 schema: 1
 tool:
-  version: 0.9.0
+  version: 0.10.0
   nfpm: 2.47.0
 # Ubuntu 24.04 and Debian 13 use ALSA's t64 package name; Debian 12 and
 # Ubuntu 22.04 the old one.
