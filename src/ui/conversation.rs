@@ -9450,8 +9450,8 @@ fn voice_player(
 /// Voice-recording controls and live waveform.
 fn recording_strip(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let (elapsed, levels) = match app.recording.as_ref() {
-        Some(recorder) => (recorder.elapsed(), recorder.levels()),
+    let (elapsed, levels, listening) = match app.recording.as_ref() {
+        Some(recorder) => (recorder.elapsed(), recorder.levels(), recorder.listening()),
         None => return,
     };
     // As tall as the one-line composer it replaces, so the field keeps its
@@ -9485,10 +9485,16 @@ fn recording_strip(app: &mut App, ui: &mut egui::Ui) {
             {
                 app.actions.push(Action::CancelRecording);
             }
+            // The light pulses red once sound arrives; while the microphone
+            // wakes it stays dim, and the time at zero.
             let (dot, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-            let pulse = 0.55 + 0.45 * (elapsed.as_secs_f32() * 3.0).sin().abs();
-            ui.painter()
-                .circle_filled(dot.center(), 5.0, palette.danger.gamma_multiply(pulse));
+            let light = if listening {
+                let pulse = 0.55 + 0.45 * (elapsed.as_secs_f32() * 3.0).sin().abs();
+                palette.danger.gamma_multiply(pulse)
+            } else {
+                palette.secondary.gamma_multiply(0.5)
+            };
+            ui.painter().circle_filled(dot.center(), 5.0, light);
             theme::text(
                 ui,
                 crate::util::duration(elapsed.as_secs() as u32),

@@ -588,14 +588,38 @@ type Outcome = Arc<Mutex<Option<Result<Vec<f32>, String>>>>;
 
 /// Records until told to stop, pushing a level per 50 ms and calling the
 /// wake function after each, and returns the mono 48 kHz samples.
-type Take = fn(&AtomicBool, &Mutex<Vec<f32>>, &dyn Fn()) -> Result<Vec<f32>, String>;
+type Take = fn(&AtomicBool, &Live, &dyn Fn()) -> Result<Vec<f32>, String>;
+
+/// What a take shows while it records: a loudness per 50 ms, and when the
+/// microphone first delivered sound.
+#[derive(Default)]
+struct Live {
+    levels: Mutex<Vec<f32>>,
+    /// Unset while the device wakes: a USB microphone the system suspended
+    /// takes a few hundred milliseconds to deliver its first samples, and
+    /// anything said before then is not recorded, so the take's time and its
+    /// light wait for them.
+    began: std::sync::OnceLock<Instant>,
+}
+
+impl Live {
+    fn push(&self, level: f32) {
+        self.levels
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(level);
+    }
+
+    fn begin(&self) {
+        let _ = self.began.set(Instant::now());
+    }
+}
 
 /// Records from the default microphone until told to stop.
 pub struct Recorder {
-    started: Instant,
     stop: Arc<AtomicBool>,
-    /// Loudness for each recorded 50 ms segment.
-    levels: Arc<Mutex<Vec<f32>>>,
+    /// Loudness for each recorded 50 ms segment, and when sound first came.
+    live: Arc<Live>,
     /// While set, a new level waits for the window's next frame instead of
     /// asking for one, so the waveform steps with a screen reader attached.
     stepped: Arc<AtomicBool>,
@@ -618,12 +642,12 @@ impl Recorder {
 
     fn spawn(waker: Waker, body: Take) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let levels: Arc<Mutex<Vec<f32>>> = Default::default();
+        let live: Arc<Live> = Default::default();
         let stepped = Arc::new(AtomicBool::new(false));
         let outcome: Outcome = Default::default();
         let spawned = {
             let stop = Arc::clone(&stop);
-            let levels = Arc::clone(&levels);
+            let live = Arc::clone(&live);
             let stepped = Arc::clone(&stepped);
             let outcome = Arc::clone(&outcome);
             std::thread::Builder::new()
@@ -634,7 +658,7 @@ impl Recorder {
                             waker.wake();
                         }
                     };
-                    let result = body(&stop, &levels, &wake);
+                    let result = body(&stop, &live, &wake);
                     *outcome.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
                     waker.wake();
                 })
@@ -647,9 +671,8 @@ impl Recorder {
             }
         };
         Self {
-            started: Instant::now(),
             stop,
-            levels,
+            live,
             stepped,
             outcome,
             thread,
@@ -662,10 +685,16 @@ impl Recorder {
         let levels: Vec<f32> = (0..90)
             .map(|index| 0.05 + 0.2 * ((index as f32 * 0.6).sin().abs()))
             .collect();
+        let live = Live {
+            levels: Mutex::new(levels),
+            began: Instant::now()
+                .checked_sub(Duration::from_millis(4_500))
+                .map(std::sync::OnceLock::from)
+                .unwrap_or_default(),
+        };
         Self {
-            started: Instant::now() - Duration::from_millis(4_500),
             stop: Arc::new(AtomicBool::new(true)),
-            levels: Arc::new(Mutex::new(levels)),
+            live: Arc::new(live),
             stepped: Default::default(),
             outcome: Default::default(),
             thread: None,
@@ -680,8 +709,18 @@ impl Recorder {
         recorder
     }
 
+    /// How long the take has recorded sound: zero while the microphone
+    /// wakes.
     pub fn elapsed(&self) -> Duration {
-        self.started.elapsed()
+        self.live
+            .began
+            .get()
+            .map_or(Duration::ZERO, Instant::elapsed)
+    }
+
+    /// Whether sound has started to arrive, so what is said now is recorded.
+    pub fn listening(&self) -> bool {
+        self.live.began.get().is_some()
     }
 
     /// Stops new levels from asking for a frame of their own while
@@ -696,7 +735,8 @@ impl Recorder {
     }
 
     pub fn levels(&self) -> Vec<f32> {
-        self.levels
+        self.live
+            .levels
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
@@ -737,11 +777,8 @@ impl Drop for Recorder {
 
 /// A speech-like tone for [`Recorder::simulated`], one level per 50 ms.
 #[cfg(any(test, feature = "demo"))]
-fn rehearse(
-    stop: &AtomicBool,
-    levels: &Mutex<Vec<f32>>,
-    wake: &dyn Fn(),
-) -> Result<Vec<f32>, String> {
+fn rehearse(stop: &AtomicBool, live: &Live, wake: &dyn Fn()) -> Result<Vec<f32>, String> {
+    live.begin();
     let segment = voice::RATE as usize / 20;
     let mut samples = Vec::new();
     while !stop.load(Ordering::Relaxed) {
@@ -755,22 +792,15 @@ fn rehearse(
         let peak = samples[start..]
             .iter()
             .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-        levels
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(peak * 0.7);
+        live.push(peak * 0.7);
         wake();
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(samples)
 }
 
-fn record(
-    stop: &AtomicBool,
-    levels: &Mutex<Vec<f32>>,
-    wake: &dyn Fn(),
-) -> Result<Vec<f32>, String> {
-    record_from(open_microphone, STALLED_MICROPHONE, stop, levels, wake)
+fn record(stop: &AtomicBool, live: &Live, wake: &dyn Fn()) -> Result<Vec<f32>, String> {
+    record_from(open_microphone, STALLED_MICROPHONE, stop, live, wake)
 }
 
 /// Opens the default microphone, with its channel count and sample rate.
@@ -791,7 +821,7 @@ fn record_from<M: Iterator<Item = f32>>(
     open: impl FnOnce() -> Result<(M, u16, u32), String> + Send + 'static,
     stalled: Duration,
     stop: &AtomicBool,
-    levels: &Mutex<Vec<f32>>,
+    live: &Live,
     wake: &dyn Fn(),
 ) -> Result<Vec<f32>, String> {
     let done = Arc::new(AtomicBool::new(false));
@@ -820,7 +850,7 @@ fn record_from<M: Iterator<Item = f32>>(
         match opened.recv_timeout(POLL_MICROPHONE) {
             Ok(Ok((channels, rate))) => {
                 let chunk = chunk_len(channels, rate);
-                let heard = capture(&samples, chunk, stalled, stop, &done, levels, wake);
+                let heard = capture(&samples, chunk, stalled, stop, &done, live, wake);
                 break Ok((heard, channels, rate));
             }
             Ok(Err(error)) => break Err(error),
@@ -883,7 +913,7 @@ fn capture(
     stalled: Duration,
     stop: &AtomicBool,
     done: &AtomicBool,
-    levels: &Mutex<Vec<f32>>,
+    live: &Live,
     wake: &dyn Fn(),
 ) -> Vec<f32> {
     let started = Instant::now();
@@ -892,6 +922,7 @@ fn capture(
     // Samples heard since the last loudness.
     let mut pending = 0;
     let mut take = |heard: &mut Vec<f32>, block: Vec<f32>| {
+        live.begin();
         pending += block.len();
         heard.extend(block);
         let mut measured = false;
@@ -899,10 +930,7 @@ fn capture(
             let end = heard.len() - (pending - chunk);
             let samples = &heard[end - chunk..end];
             let loudness = (samples.iter().map(|s| s * s).sum::<f32>() / chunk as f32).sqrt();
-            levels
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .push(loudness);
+            live.push(loudness);
             pending -= chunk;
             measured = true;
         }
@@ -1025,7 +1053,7 @@ mod tests {
         let (samples, read) = mpsc::channel();
         samples.send(vec![0.1, 0.2, 0.3]).unwrap();
         samples.send(vec![0.4]).unwrap();
-        let levels = Mutex::new(Vec::new());
+        let levels = Live::default();
         let started = Instant::now();
         let heard = capture(
             &read,
@@ -1038,7 +1066,11 @@ mod tests {
         );
         assert!(started.elapsed() >= Duration::from_millis(30));
         assert_eq!(heard, [0.1, 0.2, 0.3, 0.4], "what was heard is kept");
-        assert_eq!(levels.lock().unwrap().len(), 2, "one level per chunk");
+        assert_eq!(
+            levels.levels.lock().unwrap().len(),
+            2,
+            "one level per chunk"
+        );
         assert!(!stop.load(Ordering::Relaxed));
         drop(samples);
     }
@@ -1049,7 +1081,7 @@ mod tests {
         let (samples, read) = mpsc::channel();
         samples.send(vec![0.1, 0.2]).unwrap();
         samples.send(vec![0.3, 0.4, 0.5]).unwrap();
-        let levels = Mutex::new(Vec::new());
+        let levels = Live::default();
         let heard = capture(
             &read,
             2,
@@ -1060,7 +1092,57 @@ mod tests {
             &|| {},
         );
         assert_eq!(heard, [0.1, 0.2, 0.3, 0.4, 0.5]);
-        assert_eq!(levels.lock().unwrap().len(), 2, "one level per chunk");
+        assert_eq!(
+            levels.levels.lock().unwrap().len(),
+            2,
+            "one level per chunk"
+        );
+    }
+
+    #[test]
+    fn a_take_begins_when_the_first_sound_arrives() {
+        // A microphone the system suspended takes a few hundred milliseconds
+        // to wake: the take's time starts with its first samples, not when
+        // the device was asked for them.
+        let stop = AtomicBool::new(true);
+        let (samples, read) = mpsc::channel::<Vec<f32>>();
+        let live = Live::default();
+        capture(
+            &read,
+            2,
+            STALLED_MICROPHONE,
+            &stop,
+            &AtomicBool::new(false),
+            &live,
+            &|| {},
+        );
+        assert!(live.began.get().is_none(), "nothing has arrived yet");
+        samples.send(vec![0.1, 0.2]).unwrap();
+        capture(
+            &read,
+            2,
+            STALLED_MICROPHONE,
+            &stop,
+            &AtomicBool::new(false),
+            &live,
+            &|| {},
+        );
+        assert!(live.began.get().is_some());
+    }
+
+    #[test]
+    fn a_recorder_shows_no_time_until_it_is_listening() {
+        let recorder = Recorder {
+            stop: Arc::new(AtomicBool::new(true)),
+            live: Arc::default(),
+            stepped: Default::default(),
+            outcome: Default::default(),
+            thread: None,
+        };
+        assert!(!recorder.listening());
+        assert_eq!(recorder.elapsed(), Duration::ZERO);
+        recorder.live.begin();
+        assert!(recorder.listening());
     }
 
     /// Runs `record_from` on a thread, stopping it after `stop_after`, and
@@ -1076,7 +1158,7 @@ mod tests {
         {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                let levels = Mutex::new(Vec::new());
+                let levels = Live::default();
                 let recorded = record_from(open, stalled, &stop, &levels, &|| {});
                 let _ = done.send((recorded, started.elapsed()));
             });
@@ -1199,9 +1281,9 @@ mod tests {
         {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                let levels = Mutex::new(Vec::new());
+                let levels = Live::default();
                 let recorded = record_from(open, STALLED_MICROPHONE, &stop, &levels, &|| {});
-                let _ = done.send((recorded, levels.into_inner().unwrap().len()));
+                let _ = done.send((recorded, levels.levels.into_inner().unwrap().len()));
             });
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -1443,6 +1525,12 @@ mod tests {
     #[ignore = "needs a microphone"]
     fn records_a_second_on_this_machine() {
         let recorder = Recorder::start(Waker::default());
+        // A suspended USB microphone takes a few hundred milliseconds to wake.
+        let asked = Instant::now();
+        while !recorder.listening() && asked.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        eprintln!("listening after {:?}", asked.elapsed());
         std::thread::sleep(Duration::from_millis(1_000));
         assert!(recorder.failure().is_none(), "{:?}", recorder.failure());
         let levels = recorder.levels();

@@ -419,7 +419,10 @@ voice messages right after it that you have not heard yet, as on the phone;
 any other message ends the run. The speaker's pitch stays the same at every
 speed. The first play sends
 a played receipt. When the composer is empty, the send button becomes a
-microphone. Press Enter or the send button to send the recording, or Escape or
+microphone. The light beside the time turns red, and the time starts, once the
+microphone delivers sound: one the system had put to sleep can take a moment to
+wake, and anything said before then is not recorded. Press Enter or the send
+button to send the recording, or Escape or
 the delete button to discard it. ZapFast raises the volume of quiet recordings.
 Starting a reply before recording includes the quoted message.
 
