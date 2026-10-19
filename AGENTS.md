@@ -374,7 +374,7 @@ protocol. These notes are for coding agents and new contributors.
   showing without saying so (Hyprland does for a window covered by a
   fullscreen or maximized one, #190), and a vsync swap there blocks the event
   loop and its ping replies, so the compositor calls the app unresponsive.
-  The shared egui fork (crmne/egui apps-0.36, emilk/egui#8631) presents
+  The shared egui fork (crmne/egui apps-0.36.2, emilk/egui#8631) presents
   without a blocking swap on Wayland, paces frames by frame callbacks, and
   runs only `App::logic` when a redraw is 250 ms overdue; the winit fork
   (apps-0.30, rust-windowing/winit#4709) reports `suspended` as `Occluded`.
