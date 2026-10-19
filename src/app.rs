@@ -2646,7 +2646,7 @@ impl App {
             Content::Text { text, .. } | Content::Interactive { text, .. } => {
                 crate::markup::plain(text, &self.mention_list(message))
             }
-            _ => self.preview_line(&message.summary(), message),
+            _ => self.preview_line(&message.summary_in(self.locale), message),
         }
     }
 
@@ -15328,6 +15328,7 @@ mod tests {
         assert!(!app.addresses_us(&someone_else));
 
         let quote = |sender: &str| crate::model::Quoted {
+            labelled: None,
             chat: None,
             id: "earlier".into(),
             sender: sender.into(),
@@ -21528,6 +21529,7 @@ mod app_lock_tests {
         }];
         let mut reply = plain.clone();
         reply.quoted = Some(crate::model::Quoted {
+            labelled: None,
             chat: None,
             id: "earlier".into(),
             sender: "15550001111@s.whatsapp.net".into(),
