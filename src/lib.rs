@@ -14,6 +14,7 @@ pub mod backdrop;
 pub mod backend;
 pub mod bidi;
 pub mod call_audio;
+pub mod call_diag;
 pub mod call_tones;
 pub mod calls;
 pub mod camera;

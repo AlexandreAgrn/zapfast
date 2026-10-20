@@ -201,7 +201,13 @@ protocol. These notes are for coding agents and new contributors.
   adapts the bitrate (from 700 kbit/s) and the step of size and frame rate
   (480p15, 540p20, 720p20) to the peer's RTCP loss, its REMB, dropped video,
   and queue delay (the round trip from its reports' LSR/DLSR above the call's
-  shortest, since a deep buffer holds seconds before it loses); the camera is thinned to every nth frame of its measured rate and
+  shortest, since a deep buffer holds seconds before it loses), and climbs
+  quickly back only to just under where loss was last reported, slowly past it;
+  keyframes go out every five seconds unasked, and on the peer's request. The
+  call's heartbeat logs both directions' frame counts, keyframes and decode
+  failures, and the peer's H.264 profile (`src/call_diag.rs`);
+  `ZAPFAST_CALL_VIDEO_DUMP=<folder>` writes both directions' access units as
+  raw H.264 for offline analysis, never by default. The camera is thinned to every nth frame of its measured rate and
   stamped from capture time, never thinned by elapsed time; the peer's access
   units decode on a thread of their own and reach the window as
   `Event::CallVideo` frames. A camera that cannot open leaves a video call
