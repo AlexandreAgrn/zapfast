@@ -1476,6 +1476,59 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+/// Whether ZapFast takes part in group calls: starts them from a group's header or the Calls
+/// page, rings for them, answers them, and joins call links.
+///
+/// Off for now: in a real test neither direction carried any media (an outgoing call was accepted
+/// by WhatsApp but rang nobody; an answered incoming one received no RTP and the peer saw it
+/// reconnecting). While it is off, a group has no call button, a call link is not joined, and an
+/// incoming group call does not take the screen: the window only says who is calling and to
+/// answer on the phone, and sends WhatsApp nothing, so the phone keeps ringing. The group call
+/// code and its tests stay in place; turning this back on is the one change that brings them back.
+/// Read it through [`group_calls_enabled`], which tests can override on their own thread.
+pub const GROUP_CALLS_ENABLED: bool = false;
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own setting of [`GROUP_CALLS_ENABLED`], for this thread only.
+    static GROUP_CALLS_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether group calls are on: [`GROUP_CALLS_ENABLED`], or in a test what
+/// `override_group_calls` set.
+pub fn group_calls_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = GROUP_CALLS_OVERRIDE.with(std::cell::Cell::get) {
+        return enabled;
+    }
+    GROUP_CALLS_ENABLED
+}
+
+/// Sets group calls on or off on this thread, whatever [`GROUP_CALLS_ENABLED`] says, until the
+/// guard it returns is dropped, so the tests of either behaviour keep running with the switch in
+/// either position.
+#[cfg(test)]
+#[must_use]
+pub fn override_group_calls(enabled: bool) -> GroupCallsOverride {
+    GroupCallsOverride(GROUP_CALLS_OVERRIDE.with(|cell| cell.replace(Some(enabled))))
+}
+
+/// Puts back the setting [`override_group_calls`] replaced.
+#[cfg(test)]
+pub struct GroupCallsOverride(Option<bool>);
+
+#[cfg(test)]
+impl Drop for GroupCallsOverride {
+    fn drop(&mut self) {
+        GROUP_CALLS_OVERRIDE.with(|cell| cell.set(self.0));
+    }
+}
+
+/// What the window says when a call link is clicked while group calls are off: the English
+/// catalog key, translated where it is shown.
+pub const CALL_LINKS_OFF: &str = "ZapFast can't join group calls yet: open the link on your phone.";
+
 /// What the window says when the call service refused a group call we started with 427: the
 /// English catalog key, which the window translates when the worker hands it over as an error.
 pub const GROUP_CALLS_NOT_ENABLED: &str = "WhatsApp hasn't turned on group calls from a computer for your account yet. Ask someone in the group to call it, and answer here.";

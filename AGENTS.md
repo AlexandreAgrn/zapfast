@@ -160,8 +160,24 @@ protocol. These notes are for coding agents and new contributors.
   its pickers list and open devices by the system's id (`DeviceId`). `backend/worker/calls.rs` owns at most one
   call per account; the window (`app/calls.rs`) holds one call across all
   accounts with its `AccountId`, routes call actions to that account's
-  backend, and declines another account's offer while one is up. Group
-  calls: an offer carrying a roster (`IncomingCall::group`) or a `group-jid`
+  backend, and declines another account's offer while one is up.
+  Group calls are not available yet: `calls::GROUP_CALLS_ENABLED` is
+  `false` (a real test carried no media either way), and everything below
+  about them is the code behind that switch, kept compiling and tested
+  (`calls::override_group_calls` sets it per test thread). Read it through
+  `calls::group_calls_enabled()`. While it is off a group has no call
+  button and no call back (`ui::conversation::callable`, `call_menu`, the
+  Calls page row), a clicked call link toasts `calls::CALL_LINKS_OFF`, and
+  the worker refuses a group `StartCall` or `JoinCallLink`. An incoming
+  group offer never becomes `Worker::call`: `ring_on_phone_only` keeps it in
+  `Worker::phone_only_calls`, sends WhatsApp nothing (not even while busy),
+  so the phone keeps ringing, and emits `Event::PhoneOnlyCall`, which
+  `App::handle_phone_only_call` shows as a notification and toast saying
+  who is calling which group and to answer on the phone. Its end
+  (signaling, `MissedCall`, `CallEndedElsewhere`) files it in the group
+  through `file_finished_call`, as a call that rang here would be, and
+  takes the notification back. Turning the constant on restores all of it.
+  Group calls: an offer carrying a roster (`IncomingCall::group`) or a `group-jid`
   rings under its group (a call among several people with no group, under its
   creator's chat), named by `chat_title_of` with the member who rang, and is
   answered through the same `voip().accept`, which joins the shared relay and

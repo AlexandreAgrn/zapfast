@@ -2537,6 +2537,16 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                     }
                 }
             }
+            // While group calls are off (`calls::GROUP_CALLS_ENABLED`), a group
+            // call to us does not take the screen: the window says who is
+            // calling the group and to answer on the phone.
+            "call-group-on-phone" => {
+                group_call_sample(app, true, false);
+                if let Some(update) = app.call.take() {
+                    app.call_account = None;
+                    app.handle_phone_only_call(update);
+                }
+            }
             // The same call with our microphone muted: our own tile says so.
             "call-group-muted" => {
                 group_call_sample(app, false, false);
@@ -6099,6 +6109,7 @@ mod tests {
             "call-group-video",
             "call-group-muted",
             "call-group-calling",
+            "call-group-on-phone",
             "call-link",
             "calls-link",
             "call-video",
@@ -6248,6 +6259,8 @@ mod tests {
             ("call-group-video", narrow),
             ("call-group-muted", wide),
             ("call-group-calling", wide),
+            ("call-group-on-phone", wide),
+            ("call-group-on-phone", narrow),
             ("calls-link", wide),
             ("settings", wide),
             ("settings", narrow),
@@ -17771,20 +17784,12 @@ mod call_surface_tests {
         }
     }
 
-    /// A group's chat offers a voice and a video call in its header, as a person's does; a
-    /// channel's offers neither.
+    /// A group's chat offers a voice and a video call in its header, as a person's does, while
+    /// group calls are on; a channel's offers neither.
     #[test]
     fn a_groups_header_offers_calls() {
-        let mut app = app();
-        let group = SAMPLES
-            .iter()
-            .find(|sample| sample.id.ends_with("@g.us"))
-            .unwrap()
-            .id;
-        app.open_chat = Some(group.into());
-        let ctx = egui::Context::default();
-        app.attach(&ctx);
-        ctx.enable_accesskit();
+        let _on = crate::calls::override_group_calls(true);
+        let (mut app, ctx) = header_app();
         let shown = labels(&mut app, &ctx);
         for expected in ["Voice call", "Video call"] {
             assert!(
@@ -17804,6 +17809,62 @@ mod call_surface_tests {
             !shown.contains(&"Voice call".to_owned()),
             "a channel has no call button: {shown:?}"
         );
+    }
+
+    /// With group calls off, a group's header has no call buttons, and a person's keeps them.
+    #[test]
+    fn with_group_calls_off_a_groups_header_offers_no_calls() {
+        let _off = crate::calls::override_group_calls(false);
+        let (mut app, ctx) = header_app();
+        let shown = labels(&mut app, &ctx);
+        for absent in ["Voice call", "Video call"] {
+            assert!(
+                !shown.contains(&absent.to_owned()),
+                "{absent} is not in the group's header: {shown:?}"
+            );
+        }
+        let person = SAMPLES
+            .iter()
+            .find(|sample| sample.id.ends_with("@s.whatsapp.net"))
+            .unwrap()
+            .id;
+        app.open_chat = Some(person.into());
+        let shown = labels(&mut app, &ctx);
+        assert!(
+            shown.contains(&"Voice call".to_owned()),
+            "a person's chat still calls: {shown:?}"
+        );
+    }
+
+    /// The demo with a group's chat open, ready to read its header's labels.
+    fn header_app() -> (App, egui::Context) {
+        let mut app = app();
+        let group = SAMPLES
+            .iter()
+            .find(|sample| sample.id.ends_with("@g.us"))
+            .unwrap()
+            .id;
+        app.open_chat = Some(group.into());
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        ctx.enable_accesskit();
+        (app, ctx)
+    }
+
+    /// A group call that only the phone can answer leaves the screen alone and says so, naming
+    /// who is calling which group.
+    #[test]
+    fn a_group_call_on_the_phone_only_is_a_notice() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call-group-on-phone"));
+        assert!(app.call.is_none(), "no call screen");
+        let notice = app
+            .toasts
+            .iter()
+            .find(|toast| toast.message.contains("answer on your phone"))
+            .expect("the window says so");
+        let group = app.chat_title_of(SAMPLES[1].id);
+        assert!(notice.message.contains(&group), "{}", notice.message);
     }
 
     /// A call we started in a group is drawn as the group's, ringing everyone on it: nobody has

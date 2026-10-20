@@ -4181,24 +4181,25 @@ pub fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
 }
 
 /// Whether a chat's header offers to call it: a person's chat calls them, a
-/// group's starts a call in the group. Never the chat with ourselves, a
-/// channel or a broadcast list.
+/// group's starts a call in the group while group calls are on
+/// (`calls::GROUP_CALLS_ENABLED`). Never the chat with ourselves, a channel or
+/// a broadcast list.
 pub(crate) fn callable(chat: &crate::model::Chat, me: Option<&str>) -> bool {
     match chat.kind {
         crate::model::ChatKind::Direct => me != Some(chat.id.as_str()),
-        crate::model::ChatKind::Group => true,
+        crate::model::ChatKind::Group => crate::calls::group_calls_enabled(),
         _ => false,
     }
 }
 
 /// A call's menu: calling back, in a chat that can take a call. A group's
-/// call is called back in its group; a call among several people with no
-/// group behind it cannot be started here.
+/// call is called back in its group while group calls are on; a call among
+/// several people with no group behind it cannot be started here.
 fn call_menu(ui: &mut egui::Ui, view: &View<'_>, group: bool, actions: &mut Vec<Action>) {
     let palette = view.palette;
     let chat = &view.chat.id;
     let back = match view.chat.kind {
-        crate::model::ChatKind::Group => true,
+        crate::model::ChatKind::Group => crate::calls::group_calls_enabled(),
         crate::model::ChatKind::Direct => !group,
         _ => false,
     };

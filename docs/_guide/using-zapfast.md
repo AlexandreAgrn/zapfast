@@ -482,33 +482,20 @@ headphones, or your system's echo cancellation, when the speaker is loud.
 
 ### Group calls
 
-A group call rings under the group's name and picture and says who is calling
-("Group voice call from Jonas"), with the faces of those already on it. Once
-you answer, everyone on the call has a tile with their picture and name, and
-so do you, as **You** (with a red microphone while you are muted); someone who
-was asked but has not joined yet reads **Invited**, and the tiles follow people
-as they join and leave. Mute, the device pickers and hang up work as in
-any call, and hanging up leaves the call to the others. In a group's video
-call each member's camera fills their tile, and yours fills your own tile;
-someone whose camera is off keeps their photo. The camera
-button turns yours off and on. A group's voice call stays a voice call.
+ZapFast can't take part in group calls yet. A group's header has no call
+buttons, and a group call is started and answered on your phone.
 
-To start a call in a group, press the phone or camera button in the group's
-header, as in a person's chat. Everyone in the group is rung, and their tiles
-read **Invited** until they join; the screen says **Calling…** until the first
-of them does. WhatsApp decides for each account whether group calls can be
-started from a computer. Where it has not turned them on yet, the call ends
-at once and ZapFast says so: ask someone in the group to start the call, and
-answer it here.
+When someone calls one of your groups, ZapFast does not ring or show the call
+screen. It shows a notification, and a notice in the window while it is open,
+saying who is calling which group: "Jonas is calling Rust Berlin. ZapFast
+can't join group calls yet: answer on your phone." ZapFast sends WhatsApp
+nothing about the call, so your phone keeps ringing and you can answer there.
+A muted, archived or locked group's call stays as quiet as its messages. The
+call is still filed in the group's history when it ends.
 
-A call link in a message (`call.whatsapp.com/voice/…` or `/video/…`) joins
-that call here rather than opening the browser. The call screen says
-**Connecting…** until the call lets you in, which can take a while when its
-creator admits people one by one, then shows everyone on it as in a group call.
-Hanging up while you wait stops the join. A call joined through a link belongs
-to no chat: it is not filed in one, and shows on the Calls page as **Call
-link** with a link sign for a picture. That row only records the call; there
-is no chat to open from it and no one to call back.
+A call link in a message (`call.whatsapp.com/voice/…` or `/video/…`) is not
+joined here either: clicking it says ZapFast can't join group calls yet, so
+open the link on your phone.
 
 One call at a time: a call to another of your numbers while one is up is
 declined there. With several numbers linked, a call to a number that is not on
@@ -540,7 +527,7 @@ press `Ctrl+Shift+1`, or press Escape to go back to the chats. Switching
 numbers keeps the Calls tab open on the other number's calls. In a narrow
 window the list takes the whole window beside the rail, and a picked call's
 chat opens over both, with a Back button. Group calls show up in the history
-under their group, named by who called, and their button calls the group.
+under their group, named by who called; they are started on the phone.
 
 ## Copying
 

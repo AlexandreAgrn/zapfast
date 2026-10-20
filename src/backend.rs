@@ -1258,6 +1258,10 @@ pub enum Event {
     },
     /// The current call changed state. The UI renders this and nothing else.
     Call(Box<crate::calls::CallUpdate>),
+    /// A group call ZapFast cannot join while [`crate::calls::GROUP_CALLS_ENABLED`] is off:
+    /// ringing (`phase` is `Incoming`), so the window says who is calling and to answer on the
+    /// phone, or over, so that word is taken back. It never takes the call screen.
+    PhoneOnlyCall(Box<crate::calls::CallUpdate>),
     /// The devices the call screen can offer.
     CallDevices(Box<crate::calls::DeviceList>),
     /// The account's call entries, newest first, for the Calls page.

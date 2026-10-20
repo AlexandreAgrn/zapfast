@@ -216,6 +216,14 @@ impl Worker {
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
         if crate::model::ChatKind::from_id(&chat) == crate::model::ChatKind::Group {
+            if !calls::group_calls_enabled() {
+                // The interface offers no button for it; the worker is the boundary all the same.
+                log::warn!("[CALL] refusing to start a group call: group calls are off");
+                let mut placing = CallUpdate::placing(generation, chat.to_string(), video);
+                placing.group = Some(calls::GroupCall::default());
+                self.emit_call(placing.not_placed());
+                return;
+            }
             self.start_group_call(chat, video, generation, cancel).await;
             return;
         }
@@ -376,6 +384,12 @@ impl Worker {
             link: true,
             ..calls::GroupCall::default()
         });
+        if !calls::group_calls_enabled() {
+            log::warn!("[CALL] not joining a call link: group calls are off");
+            self.emit(Event::Error(calls::CALL_LINKS_OFF.to_owned()));
+            self.emit_call(placing.not_placed());
+            return;
+        }
         if self.call_busy() {
             self.emit_call(placing.not_placed());
             return;
@@ -715,7 +729,21 @@ impl Worker {
             }
             return;
         }
+        if let Some(index) = self.phone_only_call(action.call_id()) {
+            if let Some(update) = self.phone_only_calls[index].signaling(action) {
+                self.phone_only_changed(index, update);
+            }
+            return;
+        }
         if !calls::is_offer(action) {
+            return;
+        }
+        // A group call this device cannot join yet rings on the phone alone. Nothing goes back to
+        // WhatsApp, not even while another call is up here, since a refusal could stop the phone
+        // ringing; the window only says who is calling and to answer there.
+        let group = calls::offer_is_group(incoming);
+        if group && !calls::group_calls_enabled() {
+            self.ring_on_phone_only(incoming);
             return;
         }
         if self.call_busy() {
@@ -737,15 +765,7 @@ impl Worker {
             }
             return;
         }
-        // A group call rings under its group, as WhatsApp files it; a call among several people
-        // with no group behind it rings under the person who started it. Either way the roster the
-        // offer carried says who else is on it.
-        let group = calls::offer_is_group(incoming);
-        let chat = match calls::offer_group(incoming) {
-            Some(jid) => self.canonical(&jid),
-            None if group => self.canonical(&incoming.action.call_creator().to_non_ad()),
-            None => self.canonical(&incoming.from),
-        };
+        let chat = self.offer_chat(incoming, group);
         // A broadcast or newsletter offer never reaches the call surface, and neither does a
         // group's offer that names something other than a group. The worker is the boundary: such
         // an offer is refused here rather than rung, so no call is created and no history entry is
@@ -776,6 +796,61 @@ impl Worker {
         self.emit_call(update);
     }
 
+    /// The chat an offer rings in. A group call rings under its group, as WhatsApp files it; a
+    /// call among several people with no group behind it rings under the person who started it.
+    /// Either way the roster the offer carried says who else is on it.
+    fn offer_chat(&self, incoming: &IncomingCall, group: bool) -> ChatId {
+        match calls::offer_group(incoming) {
+            Some(jid) => self.canonical(&jid),
+            None if group => self.canonical(&incoming.action.call_creator().to_non_ad()),
+            None => self.canonical(&incoming.from),
+        }
+    }
+
+    /// Keeps a group call's offer that only the phone can answer while group calls are off, and
+    /// tells the window, which says who is calling and to answer on the phone. The call is not
+    /// this worker's call: it takes no devices, never rings here, and leaves the worker free for
+    /// another. It is filed in its group as it ends, as a call that rang here would be.
+    fn ring_on_phone_only(&mut self, incoming: &IncomingCall) {
+        let chat = self.offer_chat(incoming, true);
+        // An offer naming something other than a group is no group's call to tell anyone about.
+        if !rings_in(&chat, true) {
+            log::warn!("[CALL] ignored a group offer from a chat that cannot be called");
+            return;
+        }
+        let video = calls::offer_is_video(&incoming.action);
+        let call = Call::ringing(chat, Box::new(incoming.clone()), video);
+        log::info!(
+            "[CALL] a group call rings on the phone only, group calls are off call_id={}",
+            call.call_id()
+        );
+        let update = self.canonical_call(call.update());
+        if self.phone_only_calls.len() >= MAX_PHONE_ONLY_CALLS {
+            self.phone_only_calls.remove(0);
+        }
+        self.phone_only_calls.push(call);
+        self.emit(Event::PhoneOnlyCall(Box::new(update)));
+    }
+
+    /// Where the call `call_id` is among the group calls ringing on the phone only.
+    fn phone_only_call(&self, call_id: &str) -> Option<usize> {
+        self.phone_only_calls
+            .iter()
+            .position(|call| call.call_id() == call_id)
+    }
+
+    /// A group call ringing on the phone only moved on: once it is over it is filed in its group
+    /// and the window takes back its word about it.
+    fn phone_only_changed(&mut self, index: usize, update: CallUpdate) {
+        if update.phase.is_live() {
+            return;
+        }
+        let call = self.phone_only_calls.remove(index);
+        let update = self.canonical_call(update);
+        self.file_finished_call(&call, &update);
+        self.emit(Event::PhoneOnlyCall(Box::new(update)));
+    }
+
     /// A call we were ringing for was resolved on another of the account's devices (`elsewhere`
     /// says how), or the caller gave up before anyone answered (`None`).
     ///
@@ -795,6 +870,12 @@ impl Worker {
         };
         if let Some(update) = update {
             self.emit_call(update);
+        }
+        if let Some(index) = self.phone_only_call(call_id) {
+            mine = true;
+            if let Some(update) = self.phone_only_calls[index].resolved_elsewhere(elsewhere) {
+                self.phone_only_changed(index, update);
+            }
         }
         mine
     }
@@ -890,6 +971,10 @@ impl Worker {
         }
     }
 }
+
+/// How many group calls ringing on the phone only are kept at once. A call the phone never says
+/// the end of is let go once this many newer ones have come.
+const MAX_PHONE_ONLY_CALLS: usize = 4;
 
 /// A call to file among a chat's messages.
 pub(super) struct CallEntry {
@@ -1298,6 +1383,103 @@ mod tests {
                 status: calls::CallOutcome::Missed,
                 ..
             }
+        ));
+    }
+
+    /// With group calls off, a group's offer never becomes this worker's call: the window is told
+    /// who is calling, nothing is sent back, the worker stays free for another call, and the call
+    /// is filed in its group as it ends, as one that rang here and was answered on the phone.
+    #[tokio::test]
+    async fn with_group_calls_off_a_group_call_rings_on_the_phone_only() {
+        use crate::calls::test_offers::{CALL_ID, GROUP, group_offer, member};
+        let _off = calls::override_group_calls(false);
+        let (mut worker, events, _, _) = super::super::receipt_tests::worker();
+        worker.archive.ensure_chat(GROUP, "Book club").unwrap();
+        worker
+            .lid_to_pn
+            .insert("200000000000001".to_owned(), "15550002222".to_owned());
+        let incoming = group_offer(vec![
+            member("200000000000001", true),
+            member("200000000000002", false),
+        ]);
+        worker.call_signaling(&incoming).await;
+        assert!(worker.call.is_none(), "the worker stays free");
+        let first: Vec<Event> = events.try_iter().collect();
+        assert!(
+            !first.iter().any(|event| matches!(event, Event::Call(_))),
+            "no call screen"
+        );
+        let told = first
+            .iter()
+            .find_map(|event| match event {
+                Event::PhoneOnlyCall(update) => Some(update),
+                _ => None,
+            })
+            .expect("the window is told");
+        assert_eq!(told.chat, GROUP);
+        assert_eq!(told.phase, calls::CallPhase::Incoming);
+        assert_eq!(
+            told.group
+                .as_ref()
+                .and_then(|group| group.caller.as_deref()),
+            Some("15550002222@s.whatsapp.net")
+        );
+        // The same offer again is the same call.
+        worker.call_signaling(&incoming).await;
+        assert_eq!(worker.phone_only_calls.len(), 1);
+
+        // Answered on the phone: filed in the group, and the window takes its word back.
+        assert!(worker.call_resolved(CALL_ID, Some(calls::CallOutcome::AnsweredElsewhere)));
+        assert!(worker.phone_only_calls.is_empty());
+        let filed = worker.archive.call_log(10).unwrap();
+        assert_eq!(filed.len(), 1);
+        assert_eq!(filed[0].chat, GROUP);
+        assert_eq!(filed[0].sender, "15550002222@s.whatsapp.net");
+        assert!(matches!(
+            filed[0].content,
+            Content::Call {
+                group: true,
+                status: calls::CallOutcome::AnsweredElsewhere,
+                ..
+            }
+        ));
+        assert!(events.try_iter().any(|event| matches!(
+            event,
+            Event::PhoneOnlyCall(update) if !update.phase.is_live()
+        )));
+    }
+
+    /// With group calls off, a group call or a call link cannot be started here even if asked:
+    /// the window hears it was not placed, and a link says why.
+    #[tokio::test]
+    async fn with_group_calls_off_nothing_starts_a_group_call() {
+        let _off = calls::override_group_calls(false);
+        let (mut worker, events, _, _) = super::super::receipt_tests::worker();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        worker
+            .start_call(
+                "120363000000000009@g.us".to_owned(),
+                false,
+                7,
+                cancel.clone(),
+            )
+            .await;
+        worker
+            .join_call_link("AbCdEf1234567890".to_owned(), true, 8, cancel)
+            .await;
+        assert!(worker.call.is_none());
+        let events: Vec<Event> = events.try_iter().collect();
+        for generation in [7, 8] {
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Event::Call(update) if update.generation == generation && !update.phase.is_live()
+                )),
+                "{generation} was not placed"
+            );
+        }
+        assert!(events.iter().any(
+            |event| matches!(event, Event::Error(message) if message == calls::CALL_LINKS_OFF)
         ));
     }
 

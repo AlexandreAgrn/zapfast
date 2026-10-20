@@ -3128,6 +3128,7 @@ impl App {
                 self.me_about = about;
             }
             Event::Call(update) => self.handle_call_update(*update),
+            Event::PhoneOnlyCall(update) => self.handle_phone_only_call(*update),
             Event::CallDevices(devices) => self.call_devices = *devices,
             Event::CallVideo {
                 local,
@@ -4039,6 +4040,11 @@ impl App {
                     crate::calls::GROUP_CALLS_NOT_ENABLED => crate::i18n::gettext(
                         self.locale,
                         "WhatsApp hasn't turned on group calls from a computer for your account yet. Ask someone in the group to call it, and answer here.",
+                    )
+                    .into_owned(),
+                    crate::calls::CALL_LINKS_OFF => crate::i18n::gettext(
+                        self.locale,
+                        "ZapFast can't join group calls yet: open the link on your phone.",
                     )
                     .into_owned(),
                     _ => message,
@@ -6622,7 +6628,14 @@ impl App {
             }
             Action::OpenUrl(url) => {
                 if let Some((token, video)) = crate::safety::call_link(&url) {
-                    self.join_call_link(token, video);
+                    if crate::calls::group_calls_enabled() {
+                        self.join_call_link(token, video);
+                    } else {
+                        self.toast(crate::i18n::gettext(
+                            self.locale,
+                            "ZapFast can't join group calls yet: open the link on your phone.",
+                        ));
+                    }
                 } else if let Some(code) = crate::safety::group_invite_code(&url) {
                     self.invite = Some(crate::model::GroupInvite {
                         code: code.clone(),

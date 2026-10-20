@@ -710,6 +710,7 @@ pub async fn run(
         client: None,
         handle: None,
         call: None,
+        phone_only_calls: Vec::new(),
         call_devices: crate::calls::DeviceList::default(),
         wa_sender,
         me_pn: None,
@@ -1218,6 +1219,10 @@ struct Worker {
     /// Serial forward in flight. The next send waits for the running one.
     forward_queue: Option<ForwardQueue<ForwardJob>>,
     call: Option<calls::CallRuntime>,
+    /// Group calls ringing on the phone that this device does not join while group calls are off
+    /// (`calls::GROUP_CALLS_ENABLED`): kept only so each is filed in its group as it ends, as a
+    /// call that rang here and was answered elsewhere or missed is. Oldest first, a few at most.
+    phone_only_calls: Vec<crate::calls::Call>,
     /// The devices the call screen was last handed, kept so a device that goes away can be named
     /// by the description the user saw in the picker rather than by its node name.
     call_devices: crate::calls::DeviceList,
@@ -1492,6 +1497,7 @@ impl Worker {
                     | Event::Labels(_)
                     | Event::Typing { .. }
                     | Event::Call(_)
+                    | Event::PhoneOnlyCall(_)
                     | Event::CallDevices(_)
                     | Event::StarredList(_)
                     | Event::Pins { .. }
@@ -16691,6 +16697,7 @@ mod receipt_tests {
             client: None,
             handle: None,
             call: None,
+            phone_only_calls: Vec::new(),
             call_devices: crate::calls::DeviceList::default(),
             wa_sender,
             me_pn: Some(ME.to_owned()),
