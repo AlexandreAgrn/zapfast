@@ -2403,9 +2403,9 @@ pub enum Action {
     /// Steps forward again after a back step.
     NavigateForward,
     OpenChat(ChatId),
-    /// Starts a 1:1 voice call with the chat.
+    /// Starts a voice call with the chat: the person, or everyone in a group.
     StartCall(ChatId),
-    /// Starts a 1:1 video call with the chat.
+    /// Starts a video call with the chat: the person, or everyone in a group.
     StartVideoCall(ChatId),
     /// Picks a call history row on the Calls page: its chat opens beside the
     /// list at the call, with the chat's own call buttons in its header.

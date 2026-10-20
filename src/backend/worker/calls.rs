@@ -39,6 +39,8 @@ pub(super) enum CallRuntimeEvent {
     Ended,
     /// A call link's join finished: the call is in, or why it is not.
     LinkJoined(Result<whatsapp_rust::voip::CallHandle, String>),
+    /// The call service answered a group call we started: it is out, or why it is not.
+    GroupStarted(Result<whatsapp_rust::voip::CallHandle, calls::GroupRefusal>),
 }
 
 impl CallRuntime {
@@ -213,13 +215,17 @@ impl Worker {
         generation: u64,
         cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) {
+        if crate::model::ChatKind::from_id(&chat) == crate::model::ChatKind::Group {
+            self.start_group_call(chat, video, generation, cancel).await;
+            return;
+        }
         let placing = CallUpdate::placing(generation, chat.to_string(), video);
         if self.call_busy() {
             self.emit_call(placing.not_placed());
             return;
         }
         if !callable_chat(&chat) {
-            log::warn!("[CALL] refusing a call to a chat that is not one to one");
+            log::warn!("[CALL] refusing a call to a chat that is neither a person nor a group");
             self.emit(Event::Error("Calls are one to one only".to_owned()));
             self.emit_call(placing.not_placed());
             return;
@@ -270,6 +276,81 @@ impl Worker {
             }
             Err(error) => {
                 log::error!("[CALL] could not start the call: {error}");
+                self.emit(Event::Error(format!(
+                    "The call could not be started: {error}"
+                )));
+                self.emit_call(placing.not_placed());
+            }
+        }
+    }
+
+    /// Starts a call in the group `chat`, which the window is already showing as placing under
+    /// `generation`, the way [`Worker::start_call`] places a 1:1 call.
+    ///
+    /// The offer runs on a task of its own (the library waits for the call service's answer and
+    /// the relay before it hands the call back), and its answer comes back as
+    /// [`CallRuntimeEvent::GroupStarted`]. Until then the call reads as calling.
+    async fn start_group_call(
+        &mut self,
+        chat: ChatId,
+        video: bool,
+        generation: u64,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let mut placing = CallUpdate::placing(generation, chat.to_string(), video);
+        placing.group = Some(calls::GroupCall::default());
+        if self.call_busy() {
+            self.emit_call(placing.not_placed());
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            log::warn!("[CALL] cannot start a call: WhatsApp is not connected");
+            self.emit(Event::Error(
+                "ZapFast is not connected to WhatsApp".to_owned(),
+            ));
+            self.emit_call(placing.not_placed());
+            return;
+        };
+        let devices = self.emit_call_devices().await;
+        let camera = video
+            .then(|| calls::default_camera(&devices, None))
+            .flatten();
+        let (done, answers) = async_channel::bounded(1);
+        let placed = Call::place_group(
+            &client,
+            generation,
+            chat.to_string(),
+            video,
+            camera,
+            &cancel,
+            done,
+        )
+        .await;
+        match placed {
+            Ok((call, frames)) => {
+                let (tx, events) = async_channel::bounded(1);
+                // The call service's answer, as the runtime's first event.
+                tokio::spawn(async move {
+                    if let Ok(answer) = answers.recv().await {
+                        let _ = tx.send(CallRuntimeEvent::GroupStarted(answer)).await;
+                    }
+                });
+                let runtime = CallRuntime::joining(call, frames, events);
+                let update = runtime.call.update();
+                self.call = Some(runtime);
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    log::info!("[CALL] the call was hung up while it was being placed");
+                    self.hangup_call().await;
+                } else {
+                    self.emit_call(update);
+                }
+            }
+            Err(error) if error.is::<calls::Cancelled>() => {
+                log::info!("[CALL] {error}");
+                self.emit_call(placing.not_placed());
+            }
+            Err(error) => {
+                log::error!("[CALL] could not start the group call: {error}");
                 self.emit(Event::Error(format!(
                     "The call could not be started: {error}"
                 )));
@@ -508,11 +589,19 @@ impl Worker {
     /// One event from the current call's media plane.
     pub(super) fn call_runtime(&mut self, event: CallRuntimeEvent) {
         let mut refused = None;
+        let mut group_refused = None;
         let update = match self.call.as_mut() {
             Some(runtime) => match event {
                 CallRuntimeEvent::LinkJoined(joined) => {
                     refused = joined.as_ref().err().cloned();
                     let update = runtime.call.link_joined(joined);
+                    runtime.watch();
+                    update
+                }
+                CallRuntimeEvent::GroupStarted(started) => {
+                    let live = runtime.call.phase().is_live();
+                    group_refused = started.as_ref().err().filter(|_| live).cloned();
+                    let update = runtime.call.group_started(started);
                     runtime.watch();
                     update
                 }
@@ -534,6 +623,9 @@ impl Worker {
             self.emit(Event::Error(format!(
                 "The call link could not be joined: {error}"
             )));
+        }
+        if let Some(refusal) = group_refused {
+            self.emit(Event::Error(group_refusal_text(&refusal)));
         }
         if let Some(update) = update {
             self.emit_call(update);
@@ -1099,12 +1191,22 @@ async fn discover_devices() -> calls::DeviceList {
         .unwrap_or_default()
 }
 
-/// Whether a chat can be called at all.
+/// What the window says when the call service refused a group call we started. The plain words
+/// are a catalog key the window translates; any other refusal keeps the generic failure.
+fn group_refusal_text(refusal: &calls::GroupRefusal) -> String {
+    if refusal.not_enabled {
+        calls::GROUP_CALLS_NOT_ENABLED.to_owned()
+    } else {
+        format!("The call could not be started: {}", refusal.detail)
+    }
+}
+
+/// Whether a chat can take a one-to-one call.
 ///
-/// The interface only draws the phone and camera buttons on a one-to-one chat, but the worker is the
-/// boundary rather than the interface: a group, a channel or a broadcast list reaching the 1:1
-/// builder would be refused by the protocol at best and misbehave at worst, so the JID is checked
-/// here as well.
+/// The interface only draws the call buttons on a person's chat or a group's (which goes to
+/// [`Worker::start_group_call`]), but the worker is the boundary rather than the interface: a
+/// channel or a broadcast list reaching the 1:1 builder would be refused by the protocol at best
+/// and misbehave at worst, so the JID is checked here as well.
 fn callable_chat(chat: &str) -> bool {
     matches!(
         crate::model::ChatKind::from_id(chat),

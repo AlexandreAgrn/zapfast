@@ -491,9 +491,15 @@ as they join and leave. Mute, the device pickers and hang up work as in
 any call, and hanging up leaves the call to the others. In a group's video
 call each member's camera fills their tile, and yours fills your own tile;
 someone whose camera is off keeps their photo. The camera
-button turns yours off and on. A group's voice call stays a voice call. ZapFast does not start group calls: WhatsApp refuses them
-from linked devices, so a group's header has no call button, and a group call is
-started on the phone.
+button turns yours off and on. A group's voice call stays a voice call.
+
+To start a call in a group, press the phone or camera button in the group's
+header, as in a person's chat. Everyone in the group is rung, and their tiles
+read **Invited** until they join; the screen says **Calling…** until the first
+of them does. WhatsApp decides for each account whether group calls can be
+started from a computer. Where it has not turned them on yet, the call ends
+at once and ZapFast says so: ask someone in the group to start the call, and
+answer it here.
 
 A call link in a message (`call.whatsapp.com/voice/…` or `/video/…`) joins
 that call here rather than opening the browser. The call screen says
@@ -534,7 +540,7 @@ press `Ctrl+Shift+1`, or press Escape to go back to the chats. Switching
 numbers keeps the Calls tab open on the other number's calls. In a narrow
 window the list takes the whole window beside the rail, and a picked call's
 chat opens over both, with a Back button. Group calls show up in the history
-under their group, named by who called; they are started on the phone.
+under their group, named by who called, and their button calls the group.
 
 ## Copying
 

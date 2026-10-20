@@ -368,17 +368,23 @@ impl App {
 
     /// Places a call from the chat header or the Calls page: the screen shows
     /// it as placing in this same frame, with the peer's name and picture,
-    /// and the worker's updates move it on once its offer is out.
+    /// and the worker's updates move it on once its offer is out. A group's
+    /// chat starts a call in the group, drawn as a group call from the start.
     fn place_call(&mut self, chat: ChatId, video: bool) {
         let generation = crate::calls::next_generation();
         let cancel = Arc::new(AtomicBool::new(false));
+        let group = crate::model::ChatKind::from_id(&chat) == crate::model::ChatKind::Group;
         self.backend.send(Command::StartCall {
             chat: chat.clone(),
             video,
             generation,
             cancel: Arc::clone(&cancel),
         });
-        self.handle_call_update(CallUpdate::placing(generation, chat.to_string(), video));
+        let mut placing = CallUpdate::placing(generation, chat.to_string(), video);
+        if group {
+            placing.group = Some(crate::calls::GroupCall::default());
+        }
+        self.handle_call_update(placing);
         self.call_cancel = Some(cancel);
         self.call_placed = Some(Instant::now());
     }
@@ -1048,6 +1054,42 @@ mod tests {
         assert_eq!(chat.as_str(), ADA);
         assert_eq!(*offered, video);
         (*generation, Arc::clone(cancel))
+    }
+
+    /// A group's call button starts a call in the group, drawn as the group's
+    /// call from the first frame; WhatsApp refusing it for the account says
+    /// so in plain words, in the reader's language.
+    #[test]
+    fn a_groups_call_button_starts_a_group_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, mut commands) = app(directory.path());
+        let ctx = egui::Context::default();
+        let group = "120363000000000009@g.us";
+        app.apply(Action::StartVideoCall(group.into()), &ctx);
+        let sent = sent(&mut commands);
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Command::StartCall { chat, video: true, .. }] if chat.as_str() == group
+            ),
+            "{sent:?}"
+        );
+        let call = app.call.clone().expect("the call is on screen at once");
+        assert_eq!(call.phase, CallPhase::Placing);
+        assert!(call.group.is_some_and(|group| !group.link));
+        assert!(app.call_live_here(group), "the header offers to hang up");
+
+        app.locale = crate::i18n::Locale::German;
+        app.apply_backend_event(
+            crate::backend::Event::Error(crate::calls::GROUP_CALLS_NOT_ENABLED.to_owned()),
+            true,
+        );
+        let toast = app.toasts.last().expect("the refusal is told");
+        assert_ne!(
+            toast.message,
+            crate::calls::GROUP_CALLS_NOT_ENABLED,
+            "translated"
+        );
     }
 
     #[test]

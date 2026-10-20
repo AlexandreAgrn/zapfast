@@ -1476,6 +1476,45 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+/// What the window says when the call service refused a group call we started with 427: the
+/// English catalog key, which the window translates when the worker hands it over as an error.
+pub const GROUP_CALLS_NOT_ENABLED: &str = "WhatsApp hasn't turned on group calls from a computer for your account yet. Ask someone in the group to call it, and answer here.";
+
+/// Why a group call we started did not go out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupRefusal {
+    /// WhatsApp has not turned on group calls from linked devices for this account: the call
+    /// service refuses such an offer with 427 ("group call not enabled"). Another member can
+    /// start the call, and this device answer it.
+    pub not_enabled: bool,
+    /// The library's own words, for the log and the generic failure.
+    pub detail: String,
+}
+
+impl GroupRefusal {
+    /// Reads a failed group offer. `gate` is the account's `enable_web_group_calling` flag, when
+    /// the server has sent it.
+    ///
+    /// whatsapp-rust does not hand over the code the call service refused an offer with: a 427
+    /// ack carries a `group_info` without the counters an accepted one has, and the library reports
+    /// only that it could not read it, as a call-service response error. So such an error reads as
+    /// the 427 when the account's gate is off, or when the library names the code itself (as its
+    /// other call acks do, "... rejected with error 427"). Anything else is an ordinary failure.
+    pub fn of(error: &whatsapp_rust::CallError, gate: Option<bool>) -> Self {
+        let detail = error.to_string();
+        let not_enabled = match error {
+            whatsapp_rust::CallError::Response(message) => {
+                message.contains("error 427") || gate == Some(false)
+            }
+            _ => false,
+        };
+        Self {
+            not_enabled,
+            detail,
+        }
+    }
+}
+
 /// Counter behind [`CallUpdate::generation`].
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -1546,9 +1585,23 @@ struct GroupRoster {
     video: Vec<Jid>,
     /// Whether we joined through a call link.
     link: bool,
+    /// Us (our privacy id and phone number), on a call we started: the roster lists our own entry
+    /// as on the call from the start, which is not anyone answering.
+    own: Vec<Jid>,
 }
 
 impl GroupRoster {
+    /// Whether anyone but us is on the call: what answers a group call we started.
+    fn others_joined(&self) -> bool {
+        self.participants.iter().any(|person| {
+            let ours = |own: &Jid| {
+                person.jid.user == own.user
+                    || person.pn.as_ref().is_some_and(|pn| pn.user == own.user)
+            };
+            person.is_connected() && !self.own.iter().any(ours)
+        })
+    }
+
     /// The roster an offer rang with: `None` unless the offer is a group call's.
     ///
     /// A group offer names its group (`group-jid`), carries the call's roster, or both; a call
@@ -1919,6 +1972,170 @@ impl Call {
             },
             frames,
         ))
+    }
+
+    /// Starts a call in a group, as WhatsApp's own clients do when the group's call button is
+    /// pressed: bound to the group, ringing its current members (`group_call_by_id`). `video`
+    /// starts it as a video call. The devices open as placing a 1:1 call does, then the offer goes
+    /// out on a task of its own, since the library waits for the call service's answer and the
+    /// relay before it hands the call back. That answer arrives on `done`, and
+    /// [`Call::group_started`] applies it. Until then the call reads as calling.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn place_group(
+        client: &Arc<Client>,
+        generation: u64,
+        chat: String,
+        video: bool,
+        camera: Option<String>,
+        cancel: &AtomicBool,
+        done: async_channel::Sender<std::result::Result<CallHandle, GroupRefusal>>,
+    ) -> Result<(Self, Option<async_channel::Receiver<VideoTick>>)> {
+        let group: Jid = chat
+            .parse()
+            .map_err(|error| anyhow!("not a WhatsApp JID: {error}"))?;
+        if let Some(missing) = missing_audio_device_off_thread(None, None).await {
+            return Err(anyhow!("no {missing} is available; a call needs one"));
+        }
+        let mut pipe = None;
+        if video {
+            match VideoPipeline::start(camera.clone(), "").await {
+                Ok((pipeline, frames)) => pipe = Some((pipeline, frames)),
+                Err(error) => log::warn!("[CALL] video pipeline could not start: {error}"),
+            }
+        }
+        require_video(video, pipe.is_some())?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(Cancelled.into());
+        }
+        let (mic, mic_rx) = AudioInput::spawn(None);
+        let (output, output_tx) = AudioOutput::spawn(None);
+        let endpoints = pipe
+            .as_ref()
+            .map(|(pipeline, _)| (pipeline.source(), pipeline.sink()));
+        let own = [client.lid(), client.pn()]
+            .into_iter()
+            .flatten()
+            .map(|jid| jid.to_non_ad())
+            .collect();
+        let client = Arc::clone(client);
+        let task = tokio::spawn(async move {
+            // Whether WhatsApp lets this account start group calls from a linked device. The
+            // button is offered either way: the call service has the last word.
+            let gate = client
+                .ab_prop_enabled(whatsapp_rust::wacore::iq::abprops::web::ENABLE_WEB_GROUP_CALLING)
+                .await;
+            log::info!(
+                "[CALL] starting a group call video={video} group calling enabled={}",
+                gate.map_or("unknown".to_owned(), |gate| gate.to_string())
+            );
+            let voip = client.voip();
+            let builder = voip.group_call_by_id(&group).audio(mic_rx, output_tx);
+            let started = match endpoints {
+                Some((source, sink)) => builder.video(source, sink).start().await,
+                None => builder.start().await,
+            };
+            let started = started.map_err(|error| {
+                let refusal = GroupRefusal::of(&error, gate);
+                log::warn!(
+                    "[CALL] WhatsApp refused the group call: {} not_enabled={} (whatsapp-rust does not report the call service's error code)",
+                    refusal.detail,
+                    refusal.not_enabled
+                );
+                refusal
+            });
+            let _ = done.send(started).await;
+        });
+        let (video_pipe, frames) = match pipe {
+            Some((pipeline, frames)) => (Some(pipeline), Some(frames)),
+            None => (None, None),
+        };
+        Ok((
+            Self {
+                generation,
+                call_id: String::new(),
+                chat,
+                direction: CallDirection::Outgoing,
+                video: video_pipe.is_some(),
+                phase: CallPhase::Dialing,
+                started: None,
+                outcome: None,
+                peer_audio: None,
+                incoming: None,
+                handle: None,
+                media_ready: false,
+                mic: Some(mic),
+                speaker: Some(output),
+                camera_wanted: video_pipe
+                    .as_ref()
+                    .is_some_and(VideoPipeline::camera_running),
+                peer_video_request: None,
+                began: crate::util::now(),
+                video_pipe,
+                remote_video: false,
+                microphone: None,
+                speaker_device: None,
+                camera,
+                lost_devices: Vec::new(),
+                group: Some(GroupRoster {
+                    own,
+                    ..GroupRoster::default()
+                }),
+                join_task: Some(task.abort_handle()),
+            },
+            frames,
+        ))
+    }
+
+    /// Applies the call service's answer to a group call we started: the call is out, with the
+    /// roster it rang, or it was refused.
+    pub fn group_started(
+        &mut self,
+        started: std::result::Result<CallHandle, GroupRefusal>,
+    ) -> Option<CallUpdate> {
+        self.join_task = None;
+        if !self.phase.is_live() {
+            return None;
+        }
+        match started {
+            Ok(handle) => {
+                self.call_id = handle.call_id().to_owned();
+                if let Some(state) = handle.group_state()
+                    && let Some(update) = state.snapshot()
+                    && let Some(roster) = self.group.as_mut()
+                {
+                    roster.apply(update);
+                }
+                self.handle = Some(Arc::new(handle));
+                log::info!(
+                    "[CALL] group call started call_id={} listed={}",
+                    self.call_id,
+                    self.group
+                        .as_ref()
+                        .map_or(0, |roster| roster.participants.len())
+                );
+                self.someone_answered().or_else(|| Some(self.update()))
+            }
+            Err(refusal) => self.fail(format!("the group call was refused: {}", refusal.detail)),
+        }
+    }
+
+    /// Moves a group call we started on once anyone but us is on it: their joining is the answer,
+    /// as the peer's `<accept>` is on a 1:1 call.
+    fn someone_answered(&mut self) -> Option<CallUpdate> {
+        let roster = self.group.as_ref()?;
+        if self.direction != CallDirection::Outgoing
+            || roster.link
+            || !matches!(self.phase, CallPhase::Dialing | CallPhase::Ringing)
+            || !roster.others_joined()
+        {
+            return None;
+        }
+        log::info!(
+            "[CALL] someone joined the group call call_id={}",
+            self.call_id
+        );
+        self.phase = CallPhase::Connecting;
+        self.became_active().or_else(|| Some(self.update()))
     }
 
     /// Applies the answer of a call link's join: the call is in and its media coming up, or it
@@ -2340,7 +2557,10 @@ impl Call {
             match action {
                 // A newer roster: someone joined, left, or was asked in.
                 CallAction::GroupUpdate { update } => {
-                    return roster.apply(update).then(|| self.update());
+                    if !roster.apply(update) {
+                        return None;
+                    }
+                    return self.someone_answered().or_else(|| Some(self.update()));
                 }
                 // One invited member's answer speaks for that member alone; the call goes on for
                 // everyone else, and the roster says who is on it. The library leaves the call
@@ -2424,7 +2644,10 @@ impl Call {
                         update.participants.len()
                     );
                 }
-                changed.then(|| self.update())
+                if !changed {
+                    return None;
+                }
+                self.someone_answered().or_else(|| Some(self.update()))
             }
             CallEvent::RelayAllocated => {
                 self.media_ready = true;
@@ -4421,6 +4644,123 @@ mod tests {
         assert_eq!(update.phase, CallPhase::Failed);
         assert_eq!(update.outcome, Some(CallOutcome::Failed));
         assert!(call.link_joined(Err("again".to_owned())).is_none());
+    }
+
+    /// A group call we started rings its members until one of them joins: our own entry on the
+    /// roster is not an answer, and the call is up only once someone else is on it and the media
+    /// is too.
+    #[tokio::test]
+    async fn a_group_call_we_started_is_answered_by_a_member_joining() {
+        let mut call = dialing();
+        call.chat = GROUP.to_owned();
+        call.group = Some(GroupRoster {
+            own: vec!["200000000000099@lid".parse().unwrap()],
+            ..GroupRoster::default()
+        });
+        let ringing = roster(
+            1,
+            vec![
+                member("200000000000099", true),
+                member("200000000000001", false),
+                member("200000000000002", false),
+            ],
+        );
+        let update = call
+            .media(&CallEvent::GroupUpdated(Box::new(ringing)))
+            .expect("the roster is drawn");
+        assert_eq!(update.phase, CallPhase::Dialing, "only we are on it");
+        assert!(call.media(&CallEvent::RelayAllocated).is_none());
+        assert_eq!(
+            call.phase(),
+            CallPhase::Dialing,
+            "a relay alone is no answer"
+        );
+
+        let joined = roster(
+            2,
+            vec![
+                member("200000000000099", true),
+                member("200000000000001", true),
+                member("200000000000002", false),
+            ],
+        );
+        let update = call
+            .signaling(&CallAction::GroupUpdate {
+                update: Box::new(joined),
+            })
+            .expect("a member joined");
+        assert_eq!(update.phase, CallPhase::Active);
+        assert!(update.started.is_some());
+
+        let ended = call.hangup(None).await;
+        assert_eq!(ended.outcome, Some(CallOutcome::Answered));
+    }
+
+    /// A group call nobody joined and we hung up was not answered.
+    #[tokio::test]
+    async fn a_group_call_we_started_that_nobody_joined_was_not_answered() {
+        let mut call = dialing();
+        call.chat = GROUP.to_owned();
+        call.group = Some(GroupRoster {
+            own: vec!["200000000000099@lid".parse().unwrap()],
+            ..GroupRoster::default()
+        });
+        call.media(&CallEvent::GroupUpdated(Box::new(roster(
+            1,
+            vec![
+                member("200000000000099", true),
+                member("200000000000001", false),
+            ],
+        ))));
+        let ended = call.hangup(None).await;
+        assert_eq!(ended.phase, CallPhase::Ended);
+        assert_eq!(ended.outcome, Some(CallOutcome::NoAnswer));
+    }
+
+    /// The call service refusing a group call we started fails it as a call that never came up,
+    /// and an answer arriving after a hang-up changes nothing.
+    #[test]
+    fn a_refused_group_call_fails() {
+        let mut call = dialing();
+        call.call_id = String::new();
+        call.chat = GROUP.to_owned();
+        call.group = Some(GroupRoster::default());
+        let refusal = GroupRefusal {
+            not_enabled: true,
+            detail: "call service response failed: missing group-call integer attribute".to_owned(),
+        };
+        let update = call
+            .group_started(Err(refusal.clone()))
+            .expect("the screen is told");
+        assert_eq!(update.phase, CallPhase::Failed);
+        assert_eq!(update.outcome, Some(CallOutcome::Failed));
+        assert!(
+            update.group.is_some(),
+            "drawn as the group's call to the end"
+        );
+        assert!(call.group_started(Err(refusal)).is_none());
+    }
+
+    /// A refused group offer reads as WhatsApp not having turned group calls on for the account
+    /// when the library names the 427, or the account's gate is off; anything else stays an
+    /// ordinary failure.
+    #[test]
+    fn a_427_refusal_reads_as_group_calls_not_enabled() {
+        use whatsapp_rust::CallError;
+        let unreadable = || CallError::Response("missing group-call integer attribute".to_owned());
+        assert!(GroupRefusal::of(&unreadable(), Some(false)).not_enabled);
+        assert!(!GroupRefusal::of(&unreadable(), Some(true)).not_enabled);
+        assert!(!GroupRefusal::of(&unreadable(), None).not_enabled);
+        let named = CallError::Response("offer rejected with error 427".to_owned());
+        assert!(GroupRefusal::of(&named, Some(true)).not_enabled);
+        assert!(GroupRefusal::of(&named, None).not_enabled);
+        let other = CallError::Setup("group call requires 2..=31 remote users".to_owned());
+        assert!(!GroupRefusal::of(&other, Some(false)).not_enabled);
+        assert!(!GroupRefusal::of(&CallError::ResponseTimeout, Some(false)).not_enabled);
+        assert_eq!(
+            GroupRefusal::of(&unreadable(), Some(false)).detail,
+            "call service response failed: missing group-call integer attribute"
+        );
     }
 
     #[test]

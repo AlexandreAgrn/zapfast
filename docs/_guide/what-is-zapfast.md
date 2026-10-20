@@ -30,8 +30,8 @@ RAM, compared with 1.13 GB for WhatsApp Web and its Chromium processes.
   reactions, forwards, pictures, files, stickers, GIFs, and recorded voice
   messages.
   You can add captions to attachments before sending them.
-- **Makes calls.** Place and answer one-to-one voice and video calls, answer
-  group calls and join call links, with mute, camera and a choice of
+- **Makes calls.** Place and answer one-to-one voice and video calls, start
+  and answer group calls and join call links, with mute, camera and a choice of
   microphone, speaker and camera, and see every call in its chat and on the
   Calls page.
   [Calls](/using-zapfast/#calls).
@@ -64,7 +64,9 @@ Feature requests can be discussed within the project's
 [product boundaries](https://github.com/crmne/zapfast/blob/main/CONTRIBUTING.md#before-opening-an-issue).
 ZapFast does not currently support:
 
-- Starting group calls, creating call links, joining a group's ongoing call
+- Starting a call among several people outside a group (WhatsApp may also
+  not yet allow starting group calls from a computer for your account),
+  creating call links, joining a group's ongoing call
   from its chat, and screen sharing; status posts,
   communities, publishing to channels, and group administration beyond a
   group's name and photo (members, admins, descriptions, settings).

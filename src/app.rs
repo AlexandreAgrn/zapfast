@@ -4036,6 +4036,11 @@ impl App {
                         "This chat already has three pinned messages",
                     )
                     .into_owned(),
+                    crate::calls::GROUP_CALLS_NOT_ENABLED => crate::i18n::gettext(
+                        self.locale,
+                        "WhatsApp hasn't turned on group calls from a computer for your account yet. Ask someone in the group to call it, and answer here.",
+                    )
+                    .into_owned(),
                     _ => message,
                 };
                 self.toast_error(shown);

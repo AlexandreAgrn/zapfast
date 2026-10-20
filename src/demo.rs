@@ -2521,6 +2521,22 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             // A group's video call: three members' cameras on, Tom's off, and
             // ours in the corner.
             "call-group-video" => group_call_sample(app, false, true),
+            // A call we started in the group: nobody has joined yet, so
+            // everyone on it reads Invited while it rings.
+            "call-group-calling" => {
+                group_call_sample(app, false, false);
+                if let Some(call) = app.call.as_mut() {
+                    call.direction = crate::model::CallDirection::Outgoing;
+                    call.phase = CallPhase::Dialing;
+                    call.started = None;
+                    if let Some(group) = call.group.as_mut() {
+                        group.caller = None;
+                        for person in &mut group.participants {
+                            person.joined = false;
+                        }
+                    }
+                }
+            }
             // The same call with our microphone muted: our own tile says so.
             "call-group-muted" => {
                 group_call_sample(app, false, false);
@@ -6082,6 +6098,7 @@ mod tests {
             "call-group-active",
             "call-group-video",
             "call-group-muted",
+            "call-group-calling",
             "call-link",
             "calls-link",
             "call-video",
@@ -6230,6 +6247,7 @@ mod tests {
             ("call-group-video", wide),
             ("call-group-video", narrow),
             ("call-group-muted", wide),
+            ("call-group-calling", wide),
             ("calls-link", wide),
             ("settings", wide),
             ("settings", narrow),
@@ -17751,6 +17769,57 @@ mod call_surface_tests {
                 "{tip} is disabled once the call is over: {shown:?}"
             );
         }
+    }
+
+    /// A group's chat offers a voice and a video call in its header, as a person's does; a
+    /// channel's offers neither.
+    #[test]
+    fn a_groups_header_offers_calls() {
+        let mut app = app();
+        let group = SAMPLES
+            .iter()
+            .find(|sample| sample.id.ends_with("@g.us"))
+            .unwrap()
+            .id;
+        app.open_chat = Some(group.into());
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        ctx.enable_accesskit();
+        let shown = labels(&mut app, &ctx);
+        for expected in ["Voice call", "Video call"] {
+            assert!(
+                shown.contains(&expected.to_owned()),
+                "{expected} is in the group's header: {shown:?}"
+            );
+        }
+
+        let channel = SAMPLES
+            .iter()
+            .find(|sample| sample.id.ends_with("@newsletter"))
+            .unwrap()
+            .id;
+        app.open_chat = Some(channel.into());
+        let shown = labels(&mut app, &ctx);
+        assert!(
+            !shown.contains(&"Voice call".to_owned()),
+            "a channel has no call button: {shown:?}"
+        );
+    }
+
+    /// A call we started in a group is drawn as the group's, ringing everyone on it: nobody has
+    /// joined, so each reads as invited, and nobody is named as having rung.
+    #[test]
+    fn a_group_call_we_started_rings_its_members() {
+        let mut app = app();
+        apply_flags(&mut app, Some("call-group-calling"));
+        assert_eq!(app.call_name(), "Rust Berlin");
+        assert_eq!(app.call_caller_name(), None);
+        assert!(app.call_people().iter().all(|person| !person.joined));
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        ctx.enable_accesskit();
+        let shown = labels(&mut app, &ctx);
+        assert!(shown.contains(&"Hang up".to_owned()), "{shown:?}");
     }
 
     /// A group's call rings under the group's name and says who started it, and once up it has a

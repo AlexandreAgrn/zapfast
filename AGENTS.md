@@ -188,10 +188,23 @@ protocol. These notes are for coding agents and new contributors.
   `model::CALL_LINK_CHAT`, an id no chat has: it reaches the Calls page
   (`Event::CallLog`) and nothing else, and its row there opens nothing. The library has no
   way to join a group's ongoing call uninvited, so there is no Join banner.
-  A group offer from this device was refused with 427 ("group call not
-  enabled"), which WhatsApp gates per account (`enable_web_group_calling`,
-  logged once per connection); starting one where that gate is on is
-  untried, so a group has no call button, and a group's voice call cannot gain video. Call
+  A group's header has the call buttons a person's has: `Command::StartCall`
+  on a group chat goes to `Worker::start_group_call`, which starts the call
+  bound to the group (`voip().group_call_by_id(..)`, with video when asked) on
+  a task of its own, since the library returns only after the call service's
+  ack and the relay; its answer returns as `CallRuntimeEvent::GroupStarted`.
+  The window draws it as the group's call from `Placing`; it reads Calling
+  (`Dialing`) until someone but us joins the roster (`GroupRoster::own`), then
+  goes active once the media is up. WhatsApp gates group calls from linked
+  devices per account (`enable_web_group_calling`, logged once per connection
+  and at each start) and refuses an offer with 427 ("group call not enabled")
+  where it is off. The button is offered either way. whatsapp-rust does not
+  report that code: the 427 ack's `group_info` lacks the counters it requires,
+  so it fails as a call-service response error, which `calls::GroupRefusal`
+  reads as the 427 when the gate is off or the library names the code. Then
+  the window says `calls::GROUP_CALLS_NOT_ENABLED` (someone else in the group
+  can call it, and the call is answered here); other failures stay generic.
+  A group's voice call cannot gain video. Call
   updates are withheld during privacy recovery like other private content,
   and a locked chat's call shows only "Locked chat" until its folder opens.
   Calls open the system default devices; the call screen's pickers apply to

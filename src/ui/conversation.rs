@@ -436,11 +436,9 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                 let (subtitle, color) = subtitle(app, chat);
                 let call_here = app.call_live_here(&chat.id);
                 // More and Search, and Back in a narrow window, and the call
-                // buttons in a one-to-one chat, each on its own glass with
-                // room around it on a vibrant window.
-                let call_buttons = if chat.kind == crate::model::ChatKind::Direct
-                    && app.me.as_deref() != Some(chat.id.as_str())
-                {
+                // buttons in a person's or a group's chat, each on its own
+                // glass with room around it on a vibrant window.
+                let call_buttons = if callable(chat, app.me.as_deref()) {
                     if call_here { 1.0 } else { 2.0 }
                 } else {
                     0.0
@@ -719,9 +717,10 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) -> Rect {
                                 app.actions.push(Action::CloseChat);
                             }
                         });
-                    // Calls are one to one: a group, a channel, a broadcast
-                    // list and the chat with ourselves have no call button.
-                    // While this chat has the call, the button ends it.
+                    // A person's chat calls them and a group's starts a call
+                    // in the group; a channel, a broadcast list and the chat
+                    // with ourselves have no call button. While this chat has
+                    // the call, the button ends it.
                     if call_buttons > 0.0 {
                         let (call_tooltip, call_icon, call_fill, call) = if call_here {
                             (
@@ -4181,11 +4180,29 @@ pub fn edge_scroll(pointer: f32, top: f32, bottom: f32) -> f32 {
     }
 }
 
-/// A call's menu: calling back, in a chat that can take a call.
+/// Whether a chat's header offers to call it: a person's chat calls them, a
+/// group's starts a call in the group. Never the chat with ourselves, a
+/// channel or a broadcast list.
+pub(crate) fn callable(chat: &crate::model::Chat, me: Option<&str>) -> bool {
+    match chat.kind {
+        crate::model::ChatKind::Direct => me != Some(chat.id.as_str()),
+        crate::model::ChatKind::Group => true,
+        _ => false,
+    }
+}
+
+/// A call's menu: calling back, in a chat that can take a call. A group's
+/// call is called back in its group; a call among several people with no
+/// group behind it cannot be started here.
 fn call_menu(ui: &mut egui::Ui, view: &View<'_>, group: bool, actions: &mut Vec<Action>) {
     let palette = view.palette;
     let chat = &view.chat.id;
-    if group || view.chat.kind != crate::model::ChatKind::Direct {
+    let back = match view.chat.kind {
+        crate::model::ChatKind::Group => true,
+        crate::model::ChatKind::Direct => !group,
+        _ => false,
+    };
+    if !back {
         ui.add_enabled_ui(false, |ui| {
             widgets::menu_item(
                 ui,

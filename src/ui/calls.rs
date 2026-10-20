@@ -361,12 +361,16 @@ fn history_row(app: &mut App, ui: &mut egui::Ui, row: &[Message], actions: &mut 
             message: message.id.clone(),
         });
     }
-    // One-to-one calls only: a group call has no way back from here.
+    // A person's call is called back, and a group's call in its group; a
+    // call among several people with no group behind it has no way back
+    // from here.
     let button_rect = Rect::from_center_size(
         pos2(rect.right() - 30.0, rect.center().y),
         Vec2::splat(34.0),
     );
-    if !entry.group && !link {
+    let group_chat =
+        crate::model::ChatKind::from_id(&message.chat) == crate::model::ChatKind::Group;
+    if !link && (!entry.group || group_chat) {
         let mut child = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(button_rect)
@@ -817,6 +821,31 @@ mod tests {
         frame(&mut app, &ctx, vec![]);
         assert!(
             matches!(app.actions.as_slice(), [Action::StartCall(chat)] if chat == ADA),
+            "{:?}",
+            app.actions
+        );
+    }
+
+    /// A group's call is called back in its group, as its chat's header
+    /// starts one.
+    #[test]
+    fn a_groups_call_is_called_back_in_the_group() {
+        let (_directory, mut app, ctx) = calls_app();
+        let group = "120363000000000009@g.us";
+        let mut entry = call(group, "8", true, 60, CallStatus::Answered);
+        if let Content::Call { group, .. } = &mut entry.content {
+            *group = true;
+        }
+        app.call_log.insert(0, entry);
+        frame(&mut app, &ctx, vec![]);
+        let row = ctx
+            .read_response(row_id(group, "8"))
+            .expect("the group's call is listed")
+            .rect;
+        frame(&mut app, &ctx, click(row.right_center() - vec2(30.0, 0.0)));
+        frame(&mut app, &ctx, vec![]);
+        assert!(
+            matches!(app.actions.as_slice(), [Action::StartCall(chat)] if chat == group),
             "{:?}",
             app.actions
         );
