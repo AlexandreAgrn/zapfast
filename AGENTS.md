@@ -399,7 +399,10 @@ protocol. These notes are for coding agents and new contributors.
   pause, so a player is dropped when its sound ends. Its `Mix` renderer
   stands in for fastframe-audio's `MixerRender`, which mixes with rodio 0.21,
   until that follows rodio's newer line. `audio/microphone.rs` is an input
-  read without blocking. `Player` plays one clip at a time (OGG/Opus through
+  read without blocking. `main` names the app for volume mixers
+  (`fastframe_audio::set_app_info`) before any device opens; a call's own
+  speaker and microphone are the "Call" stream with the communication role,
+  so the system can lower other sound during a call. `Player` plays one clip at a time (OGG/Opus through
   `voice`, MP3/M4A/WAV through rodio's decoders, decoded on a thread) and
   `Recorder` reads the default microphone on a thread, keeping a loudness
   per 50 ms for the live bars. Linux needs ALSA's and libpipewire's headers
