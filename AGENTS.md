@@ -188,8 +188,10 @@ protocol. These notes are for coding agents and new contributors.
   `model::CALL_LINK_CHAT`, an id no chat has: it reaches the Calls page
   (`Event::CallLog`) and nothing else, and its row there opens nothing. The library has no
   way to join a group's ongoing call uninvited, so there is no Join banner.
-  Linked devices cannot start group calls (the server answers 427), so a group
-  has no call button, and a group's voice call cannot gain video. Call
+  A group offer from this device was refused with 427 ("group call not
+  enabled"), which WhatsApp gates per account (`enable_web_group_calling`,
+  logged once per connection); starting one where that gate is on is
+  untried, so a group has no call button, and a group's voice call cannot gain video. Call
   updates are withheld during privacy recovery like other private content,
   and a locked chat's call shows only "Locked chat" until its folder opens.
   Calls open the system default devices; the call screen's pickers apply to
