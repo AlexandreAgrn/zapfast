@@ -81,6 +81,9 @@ carousel card's picture in the viewer, among the card's other pictures.
 privately**, `private-reply` the sender's chat with the group quote in the
 composer, and `private-reply-locked-source` the same quote while its group is
 locked.
+`--demo-page call-bubbles` ends a group with one call entry of each kind
+(answered with a length, unanswered, missed and declined, voice and video,
+ours and members'), and `call-entries` files the sample calls in a chat.
 `--demo-page video` shows a video and round video messages,
 `--demo-page video-expanded` the video playing in the full-window viewer, and
 `video-playing` or `note-playing` starts one of them, silently.
