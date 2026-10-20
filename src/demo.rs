@@ -15219,6 +15219,111 @@ mod tests {
         found
     }
 
+    /// The chat list's search field centres its text's ink, from a capital's
+    /// top to a descender's bottom, on the field and its icons at every
+    /// scale, as the composer does; the hint sits on the same line, and the
+    /// clear button's cross on the same centre. Centring the line box left
+    /// lowercase text below the magnifier and the cross lower still.
+    #[test]
+    fn the_search_fields_text_centres_on_its_icons_at_every_scale() {
+        const DRAFT: &str = "Hy";
+        let field = egui::Id::new("chat-search");
+        for scale in [1.0_f32, 1.25, 1.333_333, 1.5, 2.0] {
+            let mut ink_at = None;
+            let mut hint_at = None;
+            for text in [DRAFT, ""] {
+                let mut app = app();
+                app.search = text.into();
+                let ctx = egui::Context::default();
+                ctx.enable_accesskit();
+                app.attach(&ctx);
+                let mut shapes = Vec::new();
+                let mut nodes = Vec::new();
+                for _ in 0..4 {
+                    let mut input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1180.0, 780.0),
+                        )),
+                        ..Default::default()
+                    };
+                    input
+                        .viewports
+                        .entry(egui::ViewportId::ROOT)
+                        .or_default()
+                        .native_pixels_per_point = Some(scale);
+                    let mut output = ctx.run_ui(input, |ui| {
+                        let ctx = ui.ctx().clone();
+                        app.background_frame(&ctx);
+                        app.frame_ui(ui);
+                    });
+                    output.textures_delta.clear();
+                    shapes = output.shapes;
+                    nodes = output
+                        .platform_output
+                        .accesskit_update
+                        .map(|update| {
+                            update
+                                .nodes
+                                .into_iter()
+                                .filter_map(|(_, node)| {
+                                    let label = node.label()?.to_owned();
+                                    let bounds = node.bounds()?;
+                                    Some((label, ((bounds.y0 + bounds.y1) / 2.0) as f32))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                }
+                let pill = ctx
+                    .read_response(field.with("pill"))
+                    .expect("the search field is drawn")
+                    .rect;
+                let centre = pill.center().y;
+                let tolerance = 1.0 / scale + 0.05;
+                let galley = ctx
+                    .data(|data| {
+                        data.get_temp::<egui::Rect>(crate::ui::widgets::search_galley_id(field))
+                    })
+                    .expect("the field publishes its text's place");
+                if text.is_empty() {
+                    let (_, _, hint) = painted_ink(&shapes, "Search")
+                        .into_iter()
+                        .find(|(_, _, rect)| pill.contains(rect.center()))
+                        .expect("the hint is painted in the field");
+                    assert!(
+                        (hint.top() - galley.top()).abs() < 0.01,
+                        "at {scale}x the hint starts at {}, typed text at {}",
+                        hint.top(),
+                        galley.top()
+                    );
+                    hint_at = Some(hint.top());
+                } else {
+                    let (top, bottom, _) = painted_ink(&shapes, DRAFT)
+                        .into_iter()
+                        .find(|(_, _, rect)| pill.contains(rect.center()))
+                        .expect("the draft is painted in the field");
+                    let middle = (top + bottom) / 2.0;
+                    assert!(
+                        (middle - centre).abs() <= tolerance,
+                        "at {scale}x the text centres on {middle}, the field on {centre}"
+                    );
+                    let clear = nodes
+                        .iter()
+                        .find(|(label, _)| label == "Clear")
+                        .map(|(_, y)| *y)
+                        .expect("the clear button is labelled");
+                    assert!(
+                        (clear - centre).abs() <= tolerance,
+                        "at {scale}x the clear button centres on {clear}, the field on {centre}"
+                    );
+                    ink_at = Some(galley.top());
+                }
+            }
+            assert_eq!(ink_at, hint_at, "at {scale}x hint and text share a line");
+        }
+    }
+
     /// A call entry draws as WhatsApp's: the glyph's disc centred on the
     /// title and detail together, the detail under the title at its start,
     /// and the time on the detail's line at the bubble's end, on both sides

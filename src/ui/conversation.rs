@@ -1961,17 +1961,7 @@ pub(crate) fn scroll_metrics_id(chat: &ChatId) -> egui::Id {
 fn ink_middle(ui: &egui::Ui, line_height: f32) -> f32 {
     let format = egui::TextFormat::simple(theme::regular(BODY_SIZE), Color32::WHITE);
     let (galley, _) = crate::bidi::layout_editor(ui, "Hy", &format, f32::INFINITY, true);
-    galley
-        .rows
-        .first()
-        .and_then(|row| {
-            let [capital, descender] = [row.glyphs.first()?, row.glyphs.get(1)?];
-            let top = capital.pos.y + capital.uv_rect.offset.y;
-            let bottom = descender.pos.y + descender.uv_rect.offset.y + descender.uv_rect.size.y;
-            (!capital.uv_rect.is_nothing() && !descender.uv_rect.is_nothing())
-                .then(|| row.pos.y + (top + bottom) / 2.0)
-        })
-        .unwrap_or(line_height / 2.0)
+    widgets::ink_middle(&galley).unwrap_or(line_height / 2.0)
 }
 
 /// Lays out a control centred in the composer's last-line band, however

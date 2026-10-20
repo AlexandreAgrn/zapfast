@@ -739,6 +739,25 @@ pub fn empty_state(ui: &mut Ui, palette: &Palette, icon: Icon, title: &str, body
     });
 }
 
+/// Where the ink of `galley`'s first row centres, from its top: halfway
+/// between its first glyph's top and its second's bottom. Laid out from "Hy",
+/// that is the span from a capital's top to a descender's bottom, which reads
+/// as centred whatever mix of letters a line holds. `None` when either glyph
+/// has no ink.
+pub fn ink_middle(galley: &egui::Galley) -> Option<f32> {
+    let row = galley.rows.first()?;
+    let [capital, descender] = [row.glyphs.first()?, row.glyphs.get(1)?];
+    let top = capital.pos.y + capital.uv_rect.offset.y;
+    let bottom = descender.pos.y + descender.uv_rect.offset.y + descender.uv_rect.size.y;
+    (!capital.uv_rect.is_nothing() && !descender.uv_rect.is_nothing())
+        .then(|| row.pos.y + (top + bottom) / 2.0)
+}
+
+/// Where a search field's text was laid out last frame, for layout tests.
+pub fn search_galley_id(field: egui::Id) -> egui::Id {
+    field.with("galley")
+}
+
 /// Search field with icon and clear button.
 pub fn search_field(
     ui: &mut Ui,
@@ -764,16 +783,36 @@ pub fn search_field(
     Icon::Search
         .image(palette.secondary, 16.0)
         .paint_at(ui, icon_rect);
+    let format = egui::TextFormat::simple(theme::regular(14.0), palette.text);
+    // The ink, not the line box, centres on the icons: the span from a
+    // capital's top to a descender's bottom sits as far from the field's top
+    // as from its bottom, as in the composer. Centring the line box left the
+    // platform font's lowercase a point or two below the magnifier and the
+    // clear button, since its box has more room above the capitals than
+    // below the descenders.
+    let probe = bidi::layout_field(ui, "Hy", &format, f32::INFINITY);
+    let line_height = probe.size().y;
+    let middle = ink_middle(&probe).unwrap_or(line_height / 2.0);
+    let top = fastframe_text::snap_to_pixels(rect.center().y - middle, ui.ctx().pixels_per_point());
     let field_rect = Rect::from_min_max(
-        pos2(rect.left() + 34.0, rect.top() + 1.0),
-        pos2(rect.right() - 30.0, rect.bottom() - 1.0),
+        pos2(rect.left() + 34.0, top),
+        pos2(rect.right() - 30.0, top + line_height),
     );
+    // The editor is one line tall now; the rest of the pill still focuses
+    // it, as it did when the editor filled the pill. Registered first, so
+    // the editor and the clear button win their own clicks. Not a tab
+    // stop of its own: the editor is.
+    let pill = ui
+        .interact(rect, id.with("pill"), Sense::CLICK)
+        .on_hover_cursor(egui::CursorIcon::Text);
+    if pill.clicked() {
+        ui.memory_mut(|memory| memory.request_focus(id));
+    }
     let mut child = ui.new_child(
         UiBuilder::new()
             .max_rect(field_rect)
-            .layout(Layout::left_to_right(Align::Center)),
+            .layout(Layout::left_to_right(Align::Min)),
     );
-    let format = egui::TextFormat::simple(theme::regular(14.0), palette.text);
     let mut layouter = |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, wrap: f32| {
         bidi::layout_field(ui, buffer.as_str(), &format, wrap)
     };
@@ -782,29 +821,37 @@ pub fn search_field(
     } else {
         Align::LEFT
     };
-    let response = child.add(
-        egui::TextEdit::singleline(text)
-            .id(id)
-            .hint_text(
-                egui::RichText::new(hint)
-                    .color(palette.dim)
-                    .font(theme::regular(14.0)),
-            )
-            .font(theme::regular(14.0))
-            .text_color(palette.text)
-            .frame(egui::Frame::NONE)
-            .desired_width(field_rect.width())
-            .vertical_align(Align::Center)
-            .horizontal_align(align)
-            .layouter(&mut layouter),
-    );
+    let output = egui::TextEdit::singleline(text)
+        .id(id)
+        .hint_text(
+            egui::RichText::new(hint)
+                .color(palette.dim)
+                .font(theme::regular(14.0)),
+        )
+        .font(theme::regular(14.0))
+        .text_color(palette.text)
+        .frame(egui::Frame::NONE)
+        .margin(egui::Margin::ZERO)
+        .desired_width(field_rect.width())
+        .horizontal_align(align)
+        .layouter(&mut layouter)
+        .show(&mut child);
+    ui.ctx().data_mut(|data| {
+        data.insert_temp(
+            search_galley_id(id),
+            Rect::from_min_size(output.galley_pos, output.galley.size()),
+        );
+    });
+    let response = output.response.response;
     theme::focus_outline(ui, response.id, rect, height / 2.0);
     ui.ctx()
         .accesskit_node_builder(response.id, |node| node.set_label(hint));
     if !text.is_empty() {
+        // The button's own size: a smaller box let it overflow downwards,
+        // which put the cross below the field's middle.
         let clear_rect = Rect::from_center_size(
             pos2(rect.right() - 17.0, rect.center().y),
-            Vec2::splat(24.0),
+            Vec2::splat(15.0 + theme::ICON_BUTTON_PAD),
         );
         let mut clear = ui.new_child(
             UiBuilder::new()
