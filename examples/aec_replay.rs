@@ -6,46 +6,48 @@
 //! ```
 //!
 //! It reads the dump's reference, microphone and order, feeds the canceller exactly as the call
-//! did, and prints, every second, the three signals' levels, how much the output is below the
-//! microphone, and what the canceller says of itself (its echo reduction, echo return loss and
-//! delay). It writes the processed output next to the dump (`…-replay.wav`, or `--out`). Before
-//! that it measures the true echo delay by cross-correlating the reference with the microphone,
-//! from 200 ms early to 1 s late, over the whole recording and in 20 s windows.
+//! did, and prints, every second, the three signals' levels, how far the output is below the
+//! microphone, and what the canceller says of itself. It writes the processed output next to the
+//! dump (`…-replay.wav`, or `--out`). Before that it measures the true echo delay by
+//! cross-correlating the reference with the microphone, from 200 ms early to 1 s late, over the
+//! whole recording and in 20 s windows. It ends with one `summary` line, for comparing settings.
 //!
 //! Options:
 //!
-//! - `--engine pipeline|aec3`: `pipeline` (the default) is the call's own chain, sonora's
-//!   processing with the call's configuration; `aec3` is the echo canceller alone, driven
-//!   directly with its full configuration (the options below), after the same high-pass filter;
+//! - `--engine call|pipeline`: `call` (the default) is the call's own chain
+//!   (`zapfast::call_audio::chain`); `pipeline` is sonora's pipeline with AEC3's stock settings,
+//!   as the first calls ran it;
+//! - `--base call|stock`: the AEC3 settings `--set` starts from (`call` by default);
+//! - `--set <key>=<value>`, repeatable: one AEC3 setting, by the names
+//!   `chain::apply_setting` takes (`filter.length_blocks=40`, `ep_strength.default_len=0.95`,
+//!   `suppressor.scale=0.5`, `ep_strength.bounded_erl=on`, …);
 //! - `--hint recorded|off|<ms>`: the delay hint, as the call gave it (the default), none, or fixed;
-//! - `--ns on|off`, `--agc on|off`: noise suppression and level control (`pipeline` only; on by
-//!   default, as in calls);
-//! - `--capture-delay-ms <ms>`: delays the microphone before the canceller, for a reference that
-//!   arrives after its echo;
-//! - `aec3` only: `--filter-blocks <n>` (the refined filter, 13 blocks of 4 ms by default),
-//!   `--coarse-blocks <n>` (13), `--delay-filters <n>` (the delay search's matched filters, 5,
-//!   about 100 ms each), `--down-sampling 4|8` (8 doubles the search's reach), `--delay-headroom
-//!   <samples>` (32), `--suppressor-scale <x>` (scales the suppressor's masking thresholds; below
-//!   1 suppresses more), `--nearend-average-blocks <n>` (4);
+//! - `--ns on|off`, `--agc on|off`: noise suppression and level control (on by default, as in
+//!   calls);
+//! - `--capture-delay-ms <ms>`: delays the microphone before the canceller;
+//! - `--score <from>-<to>`: the seconds of far-end-only speech to score (all by default): the
+//!   summary gives how far the output is below the microphone in each of them where the reference
+//!   is above -32 dBFS;
+//! - `--near <dBFS>`: mixes a synthetic voice at that level into the scored seconds, two seconds
+//!   on and two off, replays twice, and says how much of it came through (the output with it,
+//!   less the output without, against the voice itself);
+//! - `--live-near <from>-<to>`: seconds where someone really talked at the microphone: the summary
+//!   says how the output compares with the microphone there;
+//! - `--quiet`: only the summary;
 //! - `--out <file.wav>`: where the processed output goes.
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use sonora_aec3::block::Block;
-use sonora_aec3::block_processor::BlockProcessor;
-use sonora_aec3::config::EchoCanceller3Config;
 use zapfast::call_audio::RATE;
+use zapfast::call_audio::chain::{Chain, ChainSettings, apply_setting};
 use zapfast::call_audio::dump::{Wav, read_wav, siblings};
-use zapfast::call_audio::echo::{CHUNK, call_config};
+use zapfast::call_audio::echo::{CHUNK, stock_pipeline_config};
 
-/// AEC3's block: 4 ms at 16 kHz.
-const BLOCK: usize = 64;
-/// AEC3 works in the 16-bit range.
-const SCALE: f32 = 32_768.0;
+const SECOND: usize = RATE as usize;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Hint {
     Recorded,
     Off,
@@ -55,37 +57,43 @@ enum Hint {
 #[derive(Debug)]
 struct Options {
     reference: PathBuf,
-    engine_aec3: bool,
+    pipeline: bool,
+    stock: bool,
+    sets: Vec<(String, String)>,
     hint: Hint,
     ns: bool,
     agc: bool,
     capture_delay_ms: usize,
-    filter_blocks: Option<usize>,
-    coarse_blocks: Option<usize>,
-    delay_filters: Option<usize>,
-    down_sampling: Option<usize>,
-    delay_headroom: Option<usize>,
-    suppressor_scale: Option<f32>,
-    nearend_average_blocks: Option<usize>,
+    score: Option<(usize, usize)>,
+    near: Option<f64>,
+    live_near: Option<(usize, usize)>,
+    quiet: bool,
     out: Option<PathBuf>,
+}
+
+fn range(value: &str) -> Result<(usize, usize), String> {
+    let (from, to) = value
+        .split_once('-')
+        .ok_or_else(|| format!("expected <from>-<to>, got {value}"))?;
+    let parse = |v: &str| v.parse().map_err(|_| format!("not a number: {v}"));
+    Ok((parse(from)?, parse(to)?))
 }
 
 fn parse() -> Result<Options, String> {
     let mut args = std::env::args().skip(1);
     let mut options = Options {
         reference: PathBuf::new(),
-        engine_aec3: false,
+        pipeline: false,
+        stock: false,
+        sets: Vec::new(),
         hint: Hint::Recorded,
         ns: true,
         agc: true,
         capture_delay_ms: 0,
-        filter_blocks: None,
-        coarse_blocks: None,
-        delay_filters: None,
-        down_sampling: None,
-        delay_headroom: None,
-        suppressor_scale: None,
-        nearend_average_blocks: None,
+        score: None,
+        near: None,
+        live_near: None,
+        quiet: false,
         out: None,
     };
     let on = |value: &str| match value {
@@ -101,14 +109,31 @@ fn parse() -> Result<Options, String> {
             options.reference = PathBuf::from(arg);
             continue;
         }
+        if arg == "--quiet" {
+            options.quiet = true;
+            continue;
+        }
         let value = args.next().ok_or_else(|| format!("{arg} needs a value"))?;
         match arg.as_str() {
             "--engine" => {
-                options.engine_aec3 = match value.as_str() {
-                    "pipeline" => false,
-                    "aec3" => true,
+                options.pipeline = match value.as_str() {
+                    "call" => false,
+                    "pipeline" => true,
                     other => return Err(format!("unknown engine {other}")),
                 }
+            }
+            "--base" => {
+                options.stock = match value.as_str() {
+                    "call" => false,
+                    "stock" => true,
+                    other => return Err(format!("unknown base {other}")),
+                }
+            }
+            "--set" => {
+                let (key, value) = value
+                    .split_once('=')
+                    .ok_or_else(|| format!("expected <key>=<value>, got {value}"))?;
+                options.sets.push((key.to_owned(), value.to_owned()));
             }
             "--hint" => {
                 options.hint = match value.as_str() {
@@ -120,13 +145,9 @@ fn parse() -> Result<Options, String> {
             "--ns" => options.ns = on(&value)?,
             "--agc" => options.agc = on(&value)?,
             "--capture-delay-ms" => options.capture_delay_ms = number(&value)?,
-            "--filter-blocks" => options.filter_blocks = Some(number(&value)?),
-            "--coarse-blocks" => options.coarse_blocks = Some(number(&value)?),
-            "--delay-filters" => options.delay_filters = Some(number(&value)?),
-            "--down-sampling" => options.down_sampling = Some(number(&value)?),
-            "--delay-headroom" => options.delay_headroom = Some(number(&value)?),
-            "--suppressor-scale" => options.suppressor_scale = Some(number(&value)?),
-            "--nearend-average-blocks" => options.nearend_average_blocks = Some(number(&value)?),
+            "--score" => options.score = Some(range(&value)?),
+            "--near" => options.near = Some(number(&value)?),
+            "--live-near" => options.live_near = Some(range(&value)?),
             "--out" => options.out = Some(PathBuf::from(value)),
             other => return Err(format!("unknown option {other}")),
         }
@@ -178,8 +199,23 @@ fn mean_square(samples: &[f32]) -> f64 {
 trait Canceller {
     fn render(&mut self, chunk: &[f32]);
     fn capture(&mut self, chunk: &mut [f32], hint: Option<i32>);
-    /// Echo reduction, echo return loss, delay, as the canceller reports them.
-    fn state(&self) -> (Option<f64>, Option<f64>, Option<i32>);
+    /// What the canceller says of itself.
+    fn state(&self) -> String;
+}
+
+impl Canceller for Chain {
+    fn render(&mut self, chunk: &[f32]) {
+        Chain::render(self, chunk);
+    }
+
+    fn capture(&mut self, chunk: &mut [f32], hint: Option<i32>) {
+        Chain::capture(self, chunk, hint);
+    }
+
+    fn state(&self) -> String {
+        let (erle, erl, delay) = self.metrics();
+        format!("{erle:>6.1} dB {erl:>8.1} dB {delay:>4} ms")
+    }
 }
 
 struct Pipeline {
@@ -189,7 +225,7 @@ struct Pipeline {
 
 impl Pipeline {
     fn new(options: &Options) -> Self {
-        let mut config = call_config();
+        let mut config = stock_pipeline_config();
         if !options.ns {
             config.noise_suppression = None;
         }
@@ -228,129 +264,137 @@ impl Canceller for Pipeline {
         }
     }
 
-    fn state(&self) -> (Option<f64>, Option<f64>, Option<i32>) {
+    fn state(&self) -> String {
         let stats = self.processing.statistics();
-        (
-            stats.echo_return_loss_enhancement,
-            stats.echo_return_loss,
-            stats.delay_ms,
+        let shown = |v: Option<f64>| v.map_or("-".to_owned(), |v| format!("{v:.1} dB"));
+        format!(
+            "{:>9} {:>11} {:>7}",
+            shown(stats.echo_return_loss_enhancement),
+            shown(stats.echo_return_loss),
+            stats.delay_ms.map_or("-".to_owned(), |d| format!("{d} ms"))
         )
     }
 }
 
-struct Aec3 {
-    processor: BlockProcessor,
-    high_pass: sonora::high_pass_filter::HighPassFilter,
-    render: VecDeque<f32>,
-    capture_in: VecDeque<f32>,
-    capture_out: VecDeque<f32>,
-    block: Block,
+fn canceller(options: &Options) -> Result<Box<dyn Canceller>, String> {
+    if options.pipeline {
+        return Ok(Box::new(Pipeline::new(options)));
+    }
+    let mut settings = if options.stock {
+        ChainSettings::stock()
+    } else {
+        ChainSettings::call()
+    };
+    for (key, value) in &options.sets {
+        apply_setting(&mut settings.aec3, key, value)?;
+    }
+    settings.noise_suppression = options.ns;
+    settings.gain_control = options.agc;
+    Ok(Box::new(Chain::new(&settings)))
 }
 
-impl Aec3 {
-    fn new(options: &Options) -> Self {
-        let mut config = EchoCanceller3Config::default();
-        if let Some(blocks) = options.filter_blocks {
-            config.filter.refined.length_blocks = blocks;
-            config.filter.refined_initial.length_blocks = blocks;
+/// Feeds the canceller as the call did and returns its output; prints a line a second unless
+/// `quiet`.
+fn replay(
+    options: &Options,
+    reference: &[f32],
+    microphone: &[f32],
+    order: &[(usize, i32)],
+    quiet: bool,
+) -> Result<Vec<f32>, String> {
+    let mut canceller = canceller(options)?;
+    let capture_delay = options.capture_delay_ms * SECOND / 1_000;
+    let mut delayed: VecDeque<f32> = VecDeque::from(vec![0.0; capture_delay]);
+    let chunks = order.len().min(microphone.len() / CHUNK);
+    let mut fed = 0_usize;
+    let mut output = Vec::with_capacity(chunks * CHUNK);
+    let mut second_ref = Vec::new();
+    if !quiet {
+        println!(
+            "  time   reference  microphone      output   reduced | canceller: reduced  return loss  delay"
+        );
+    }
+    for (index, (count, hint)) in order.iter().take(chunks).enumerate() {
+        for _ in 0..*count {
+            let Some(chunk) = reference.get(fed * CHUNK..(fed + 1) * CHUNK) else {
+                break;
+            };
+            canceller.render(chunk);
+            second_ref.extend_from_slice(chunk);
+            fed += 1;
         }
-        if let Some(blocks) = options.coarse_blocks {
-            config.filter.coarse.length_blocks = blocks;
-            config.filter.coarse_initial.length_blocks = blocks;
-        }
-        if let Some(filters) = options.delay_filters {
-            config.delay.num_filters = filters;
-        }
-        if let Some(factor) = options.down_sampling {
-            config.delay.down_sampling_factor = factor;
-        }
-        if let Some(samples) = options.delay_headroom {
-            config.delay.delay_headroom_samples = samples;
-        }
-        if let Some(scale) = options.suppressor_scale {
-            for tuning in [
-                &mut config.suppressor.normal_tuning,
-                &mut config.suppressor.nearend_tuning,
-            ] {
-                for mask in [&mut tuning.mask_lf, &mut tuning.mask_hf] {
-                    mask.enr_transparent *= scale;
-                    mask.enr_suppress *= scale;
-                }
+        delayed.extend(
+            microphone[index * CHUNK..(index + 1) * CHUNK]
+                .iter()
+                .copied(),
+        );
+        let mut chunk: Vec<f32> = delayed.drain(..CHUNK).collect();
+        let hint = match options.hint {
+            Hint::Recorded => Some(*hint),
+            Hint::Off => None,
+            Hint::Fixed(ms) => Some(ms),
+        };
+        canceller.capture(&mut chunk, hint);
+        output.extend_from_slice(&chunk);
+        if (index + 1) % 100 == 0 {
+            if !quiet {
+                let second = (index + 1) / 100 - 1;
+                let span = second * SECOND..(second + 1) * SECOND;
+                let (mic, out) = (
+                    mean_square(&microphone[span.clone()]),
+                    mean_square(&output[span]),
+                );
+                println!(
+                    "{:>5} s {:>7.1} dBFS {:>7.1} dBFS {:>7.1} dBFS {:>6.1} dB | {}",
+                    second + 1,
+                    db(mean_square(&second_ref)),
+                    db(mic),
+                    db(out),
+                    db(mic) - db(out),
+                    canceller.state(),
+                );
             }
-        }
-        if let Some(blocks) = options.nearend_average_blocks {
-            config.suppressor.nearend_average_blocks = blocks;
-        }
-        if !config.validate() {
-            eprintln!("note: AEC3 clamped some of the settings to its limits");
-        }
-        Self {
-            processor: BlockProcessor::new(&config, RATE as usize, 1, 1),
-            high_pass: sonora::high_pass_filter::HighPassFilter::new(RATE as i32, 1),
-            render: VecDeque::new(),
-            capture_in: VecDeque::new(),
-            capture_out: VecDeque::from(vec![0.0; BLOCK]),
-            block: Block::new(1, 1),
+            second_ref.clear();
         }
     }
+    Ok(output)
 }
 
-impl Canceller for Aec3 {
-    fn render(&mut self, chunk: &[f32]) {
-        self.render.extend(chunk.iter().map(|s| s * SCALE));
-        while self.render.len() >= BLOCK {
-            for (to, from) in self
-                .block
-                .view_mut(0, 0)
-                .iter_mut()
-                .zip(self.render.drain(..BLOCK))
-            {
-                *to = from;
-            }
-            self.processor.buffer_render(&self.block);
-        }
+/// Something shaped like speech: noise coloured by a wandering resonance with a pitched buzz under
+/// it, in syllables with pauses between words, scaled to `level` dBFS while it sounds.
+fn voice(samples: usize, level: f64) -> Vec<f32> {
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut noise = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        ((state >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
+    };
+    let (mut y1, mut y2, mut phase) = (0.0_f32, 0.0_f32, 0.0_f32);
+    let tau = std::f32::consts::TAU;
+    let mut out: Vec<f32> = (0..samples)
+        .map(|index| {
+            let t = index as f32 / RATE as f32;
+            let formant = 900.0 + 600.0 * (tau * 0.6 * t).sin();
+            let theta = tau * formant / RATE as f32;
+            let y = noise() * 0.3 + 2.0 * 0.97 * theta.cos() * y1 - 0.97 * 0.97 * y2;
+            y2 = y1;
+            y1 = y;
+            phase = (phase + 190.0 * (1.0 + 0.1 * (tau * 1.1 * t).sin()) / RATE as f32).fract();
+            let buzz: f32 = (1..=14)
+                .map(|h| (tau * h as f32 * phase).sin() / h as f32)
+                .sum();
+            let syllable = (std::f32::consts::PI * 4.0 * t).sin().abs();
+            (y * 0.02 + buzz * 0.08) * syllable
+        })
+        .collect();
+    let gain = (10f64.powf(level / 10.0) / mean_square(&out).max(1e-20)).sqrt() as f32;
+    for sample in &mut out {
+        *sample *= gain;
     }
-
-    fn capture(&mut self, chunk: &mut [f32], hint: Option<i32>) {
-        if let Some(hint) = hint {
-            self.processor.set_audio_buffer_delay(hint);
-        }
-        let mut filtered = vec![chunk.iter().map(|s| s * SCALE).collect::<Vec<f32>>()];
-        self.high_pass.process_channels(&mut filtered);
-        self.capture_in.extend(filtered.remove(0));
-        while self.capture_in.len() >= BLOCK {
-            let mut saturated = false;
-            for (to, from) in self
-                .block
-                .view_mut(0, 0)
-                .iter_mut()
-                .zip(self.capture_in.drain(..BLOCK))
-            {
-                saturated |= from.abs() >= 32_700.0;
-                *to = from;
-            }
-            self.processor
-                .process_capture(false, saturated, None, &mut self.block);
-            self.capture_out
-                .extend(self.block.view(0, 0).iter().copied());
-        }
-        for sample in chunk.iter_mut() {
-            *sample = self.capture_out.pop_front().unwrap_or(0.0) / SCALE;
-        }
-    }
-
-    fn state(&self) -> (Option<f64>, Option<f64>, Option<i32>) {
-        let metrics = self.processor.get_metrics();
-        (
-            Some(metrics.echo_return_loss_enhancement),
-            Some(metrics.echo_return_loss),
-            Some(metrics.delay_ms),
-        )
-    }
+    out
 }
 
-/// The reference on the microphone's timeline: each reference chunk where it was fed, the stream
-/// shifted by the median gap between its count and the microphone's.
 fn aligned_reference(
     reference: &[f32],
     order: &[(usize, i32)],
@@ -450,109 +494,144 @@ fn run() -> Result<(), String> {
     let microphone = read(&microphone_path)?;
     let order = read_order(&order_path)?;
     let chunks = order.len().min(microphone.len() / CHUNK);
-    println!(
-        "{} s of microphone, {} s of reference, {chunks} chunks; {options:?}",
-        microphone.len() / RATE as usize,
-        reference.len() / RATE as usize
-    );
-
-    // The true echo delay, from the recording itself.
     let length = chunks * CHUNK;
     let (aligned, drift) = aligned_reference(&reference, &order, length);
-    println!("{drift}");
-    let early = i64::from(RATE) / 5;
-    let late = i64::from(RATE);
-    match echo_lag(&aligned, &microphone[..length], early, late) {
-        Some((lag, correlation)) => println!(
-            "true echo delay over the whole recording: {:.1} ms (correlation {correlation:+.3})",
-            lag as f64 * 1_000.0 / f64::from(RATE)
-        ),
-        None => println!("true echo delay: the reference or the microphone is silent"),
-    }
-    let window = 20 * RATE as usize;
-    for start in (0..length.saturating_sub(window / 2)).step_by(window) {
-        let end = (start + window).min(length);
-        if let Some((lag, correlation)) =
-            echo_lag(&aligned[start..end], &microphone[start..end], early, late)
-        {
-            println!(
-                "  {:>4} s to {:>4} s: {:.1} ms (correlation {correlation:+.3})",
-                start / RATE as usize,
-                end / RATE as usize,
+    if !options.quiet {
+        println!(
+            "{} s of microphone, {} s of reference, {chunks} chunks; {options:?}",
+            microphone.len() / SECOND,
+            reference.len() / SECOND
+        );
+        println!("{drift}");
+        let early = i64::from(RATE) / 5;
+        let late = i64::from(RATE);
+        match echo_lag(&aligned, &microphone[..length], early, late) {
+            Some((lag, correlation)) => println!(
+                "true echo delay over the whole recording: {:.1} ms (correlation {correlation:+.3})",
                 lag as f64 * 1_000.0 / f64::from(RATE)
-            );
+            ),
+            None => println!("true echo delay: the reference or the microphone is silent"),
+        }
+        let window = 20 * SECOND;
+        for start in (0..length.saturating_sub(window / 2)).step_by(window) {
+            let end = (start + window).min(length);
+            if let Some((lag, correlation)) =
+                echo_lag(&aligned[start..end], &microphone[start..end], early, late)
+            {
+                println!(
+                    "  {:>4} s to {:>4} s: {:.1} ms (correlation {correlation:+.3})",
+                    start / SECOND,
+                    end / SECOND,
+                    lag as f64 * 1_000.0 / f64::from(RATE)
+                );
+            }
         }
     }
 
-    let mut canceller: Box<dyn Canceller> = if options.engine_aec3 {
-        Box::new(Aec3::new(&options))
-    } else {
-        Box::new(Pipeline::new(&options))
-    };
-    let capture_delay = options.capture_delay_ms * RATE as usize / 1_000;
-    let mut delayed: VecDeque<f32> = VecDeque::from(vec![0.0; capture_delay]);
+    let output = replay(
+        &options,
+        &reference,
+        &microphone[..length],
+        &order,
+        options.quiet,
+    )?;
     let out_path = options.out.clone().unwrap_or_else(|| {
         let name = reference_path.to_string_lossy();
         PathBuf::from(name.replace("reference.wav", "replay.wav"))
     });
     let mut out =
         Wav::create(&out_path).map_err(|error| format!("{}: {error}", out_path.display()))?;
-    let mut fed = 0_usize;
-    let (mut second_ref, mut second_mic, mut second_out) = (Vec::new(), Vec::new(), Vec::new());
-    let mut total_mic = 0.0;
-    let mut total_out = 0.0;
-    println!(
-        "  time   reference  microphone      output   reduced | canceller: reduced  return loss  delay"
-    );
-    for (index, (count, hint)) in order.iter().take(chunks).enumerate() {
-        for _ in 0..*count {
-            let Some(chunk) = reference.get(fed * CHUNK..(fed + 1) * CHUNK) else {
-                break;
-            };
-            canceller.render(chunk);
-            second_ref.extend_from_slice(chunk);
-            fed += 1;
-        }
-        let raw = &microphone[index * CHUNK..(index + 1) * CHUNK];
-        delayed.extend(raw.iter().copied());
-        let mut chunk: Vec<f32> = delayed.drain(..CHUNK).collect();
-        second_mic.extend_from_slice(&chunk);
-        let hint = match options.hint {
-            Hint::Recorded => Some(*hint),
-            Hint::Off => None,
-            Hint::Fixed(ms) => Some(ms),
-        };
-        canceller.capture(&mut chunk, hint);
-        out.write(&chunk);
-        second_out.extend_from_slice(&chunk);
-        if (index + 1) % 100 == 0 {
-            let (mic, output) = (mean_square(&second_mic), mean_square(&second_out));
-            total_mic += mic;
-            total_out += output;
-            let (erle, erl, delay) = canceller.state();
-            let shown = |value: Option<f64>| value.map_or("-".to_owned(), |v| format!("{v:.1} dB"));
-            println!(
-                "{:>5} s {:>7.1} dBFS {:>7.1} dBFS {:>7.1} dBFS {:>6.1} dB | {:>10} {:>12} {:>6}",
-                (index + 1) / 100,
-                db(mean_square(&second_ref)),
-                db(mic),
-                db(output),
-                db(mic) - db(output),
-                shown(erle),
-                shown(erl),
-                delay.map_or("-".to_owned(), |d| format!("{d} ms")),
-            );
-            second_ref.clear();
-            second_mic.clear();
-            second_out.clear();
-        }
-    }
+    out.write(&output);
     out.patch();
-    println!(
-        "overall the output is {:.1} dB below the microphone; written to {}",
-        db(total_mic) - db(total_out),
-        out_path.display()
-    );
+
+    // The score: far-end-only seconds where the peer is heard.
+    let seconds = length / SECOND;
+    let (from, to) = options.score.unwrap_or((0, seconds));
+    let scored: Vec<usize> = (from..to.min(seconds))
+        .filter(|second| {
+            db(mean_square(
+                &aligned[second * SECOND..(second + 1) * SECOND],
+            )) > -32.0
+        })
+        .collect();
+    let reductions: Vec<f64> = scored
+        .iter()
+        .map(|second| {
+            let span = second * SECOND..(second + 1) * SECOND;
+            db(mean_square(&microphone[span.clone()])) - db(mean_square(&output[span]))
+        })
+        .collect();
+    let mut summary = String::from("summary:");
+    if reductions.is_empty() {
+        summary.push_str(" no far-end seconds to score;");
+    } else {
+        let mut sorted = reductions.clone();
+        sorted.sort_by(f64::total_cmp);
+        let energy = |signal: &[f32]| -> f64 {
+            scored
+                .iter()
+                .map(|second| mean_square(&signal[second * SECOND..(second + 1) * SECOND]))
+                .sum()
+        };
+        summary.push_str(&format!(
+            " far-end only ({} s in {from}-{to}): mean {:.1} dB, median {:.1}, worst {:.1}, overall {:.1}, under 25 dB {};",
+            scored.len(),
+            reductions.iter().sum::<f64>() / reductions.len() as f64,
+            sorted[sorted.len() / 2],
+            sorted[0],
+            db(energy(&microphone)) - db(energy(&output)),
+            reductions.iter().filter(|r| **r < 25.0).count(),
+        ));
+    }
+    if let Some(level) = options.near {
+        // Two seconds on and two off, over the scored seconds.
+        let near_all = voice(length, level);
+        let mut near = vec![0.0_f32; length];
+        let mut on = Vec::new();
+        for second in from..to.min(seconds) {
+            if (second - from) % 4 < 2 {
+                let span = second * SECOND..(second + 1) * SECOND;
+                near[span.clone()].copy_from_slice(&near_all[span]);
+                on.push(second);
+            }
+        }
+        let mixed: Vec<f32> = microphone[..length]
+            .iter()
+            .zip(&near)
+            .map(|(m, n)| m + n)
+            .collect();
+        let with = replay(&options, &reference, &mixed, &order, true)?;
+        let passed: Vec<f32> = with.iter().zip(&output).map(|(w, o)| w - o).collect();
+        let span_energy = |signal: &[f32]| -> f64 {
+            on.iter()
+                .map(|second| mean_square(&signal[second * SECOND..(second + 1) * SECOND]))
+                .sum()
+        };
+        let during_echo: Vec<usize> = on
+            .iter()
+            .copied()
+            .filter(|second| scored.contains(second))
+            .collect();
+        let echo_energy = |signal: &[f32]| -> f64 {
+            during_echo
+                .iter()
+                .map(|second| mean_square(&signal[second * SECOND..(second + 1) * SECOND]))
+                .sum()
+        };
+        summary.push_str(&format!(
+            " a voice at {level:.0} dBFS mixed in comes out at {:+.1} dB ({:+.1} dB while the peer talks);",
+            db(span_energy(&passed)) - db(span_energy(&near)),
+            db(echo_energy(&passed)) - db(echo_energy(&near)),
+        ));
+    }
+    if let Some((from, to)) = options.live_near {
+        let span = from * SECOND..to.min(seconds) * SECOND;
+        summary.push_str(&format!(
+            " live near end {from}-{to} s: output {:+.1} dB against the microphone;",
+            db(mean_square(&output[span.clone()])) - db(mean_square(&microphone[span]))
+        ));
+    }
+    println!("{summary} output in {}", out_path.display());
     Ok(())
 }
 

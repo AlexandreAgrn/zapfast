@@ -142,6 +142,9 @@ rtrb = "0.3"
 # suppressor and AGC2) ported to Rust, so it builds wherever Rust does with no
 # C++, meson or system library. Its C++ test suite runs against the port.
 sonora = "0.2"
+# AEC3 itself, driven directly with a configuration for speakers in a room,
+# which sonora's pipeline does not take. Already included through sonora.
+sonora-aec3 = "0.2"
 # rodio's own copy, named to decode a video's AAC track that `mp4` reads:
 # symphonia 0.5's MP4 reader refuses the sound of WhatsApp's videos (#265).
 symphonia = { version = "0.5.5", default-features = false, features = ["aac"] }
@@ -300,9 +303,6 @@ winresource = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
-# The echo canceller itself, which `examples/aec_replay.rs` drives with
-# settings sonora's pipeline does not expose. Already included through sonora.
-sonora-aec3 = "0.2"
 # Checks the default log filter the way fastframe-log's logger reads it.
 # Already in the tree through fastframe-log, at this version.
 env_logger = { version = "0.11", default-features = false }

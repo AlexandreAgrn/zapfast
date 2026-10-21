@@ -480,8 +480,11 @@ Calls use your platform's own audio (PipeWire, PulseAudio or ALSA on Linux, Core
 macOS, WASAPI on Windows). ZapFast cancels echo itself, with the echo canceller
 browsers use (WebRTC's), so you can call with speakers and a microphone and the
 other side does not hear themselves: what the speaker plays is taken back out of
-what the microphone picks up before it is sent. The first moments of a call, or
-of a new device, may let a little echo through while it learns the room. It
+what the microphone picks up before it is sent, including the room's
+reverberation, which in a bare room with desk speakers is most of the echo. The
+first moments of a call, or of a new device, may let a little echo through while
+it learns the room, and while both of you talk at once your voice may come
+through a little quieter in a very reverberant room. It
 also turns down steady background noise, such as a fan, and raises a quiet
 microphone (by at most the same amount voice messages are raised), but it never
 changes your system's microphone volume. With headphones there is no echo to

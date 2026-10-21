@@ -1,10 +1,11 @@
 //! Echo cancellation: the far end's voice taken back out of our microphone before it is sent.
 //!
 //! Through speakers the microphone hears the peer as well as us, and without this the peer hears
-//! themselves a moment later. WebRTC's echo canceller (AEC3, through sonora's Rust port of
-//! WebRTC's audio processing) learns the path from what the speaker played to what the
-//! microphone picked up and subtracts it; the same pipeline then suppresses steady background
-//! noise and evens out a quiet microphone's level.
+//! themselves a moment later. WebRTC's echo canceller (AEC3, from sonora's Rust port of WebRTC's
+//! audio processing, run by [`super::chain`] with settings for speakers in a room) learns the
+//! path from what the speaker played to what the microphone picked up, subtracts it and
+//! suppresses what is left, the room's reverberation included; the chain then suppresses steady
+//! background noise and evens out a quiet microphone's level.
 //!
 //! The reference is what the call's speaker hands its device, taken in the output's audio
 //! callback by a `Tap` (`Mix`'s monitor) and carried mono across a lock-free ring, so it is the
@@ -19,10 +20,12 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use sonora::Config;
 use sonora::config::{
     AdaptiveDigital, EchoCanceller, GainController2, HighPassFilter, NoiseSuppression,
 };
-use sonora::{AudioProcessing, Config, StreamConfig};
+
+use super::chain::{Chain, ChainSettings};
 
 use super::RATE;
 
@@ -37,9 +40,6 @@ const RING_SAMPLES: usize = 48_000;
 /// stopped (a device change, a stall), and playing the canceller a quarter of a second of old
 /// sound would only make it search for a delay that is not there.
 const BACKLOG_MS: u32 = 250;
-/// The largest gain the level control may add: 20 dB, the ten times `voice::normalize` caps a
-/// voice message's at, so a quiet microphone is raised as far as a recorded one and no further.
-const MAX_GAIN_DB: f32 = 20.0;
 
 /// The far end's voice as one call's speaker played it, shared by that call's speaker and
 /// microphone. Each speaker stream gets a `Tap` of its own; the microphone's canceller reads
@@ -166,26 +166,17 @@ pub(crate) enum Stages {
     EchoOnly,
 }
 
-/// The processing a call runs, all stages on: `examples/aec_replay.rs` replays a dump through it.
-pub fn call_config() -> Config {
-    config(Stages::All)
-}
-
-fn config(stages: Stages) -> Config {
-    let all = stages == Stages::All;
+/// sonora's own pipeline as the first calls ran it: AEC3 with its stock settings, noise
+/// suppression and level control. `examples/aec_replay.rs` compares the call's chain with it.
+pub fn stock_pipeline_config() -> Config {
     Config {
         high_pass_filter: Some(HighPassFilter::default()),
         echo_canceller: Some(EchoCanceller::default()),
-        // Moderate is WebRTC's own default, about 12 dB off steady noise: a fan or a hum, not a
-        // voice.
-        noise_suppression: all.then(NoiseSuppression::default),
-        // The digital gain only. The input volume controller would move the system's microphone
-        // volume, which is the person's to set. It starts from no gain at all and rises only as
-        // far as a voice message's normalization would.
-        gain_controller2: all.then(|| GainController2 {
+        noise_suppression: Some(NoiseSuppression::default()),
+        gain_controller2: Some(GainController2 {
             input_volume_controller: false,
             adaptive_digital: Some(AdaptiveDigital {
-                max_gain_db: MAX_GAIN_DB,
+                max_gain_db: 20.0,
                 initial_gain_db: 0.0,
                 ..AdaptiveDigital::default()
             }),
@@ -195,10 +186,19 @@ fn config(stages: Stages) -> Config {
     }
 }
 
+fn settings(stages: Stages) -> ChainSettings {
+    let mut settings = ChainSettings::call();
+    if stages != Stages::All {
+        settings.noise_suppression = false;
+        settings.gain_control = false;
+    }
+    settings
+}
+
 /// One microphone stream's canceller: it processes the microphone at [`RATE`], [`CHUNK`] samples
 /// at a time, against whatever the call's speaker played since the chunk before.
 pub(crate) struct Canceller {
-    processing: AudioProcessing,
+    chain: Chain,
     far_end: FarEnd,
     /// The speaker stream last read, or 0 before the first.
     generation: u64,
@@ -206,8 +206,6 @@ pub(crate) struct Canceller {
     /// The far end's samples at [`RATE`] not yet a whole chunk.
     render: [f32; CHUNK],
     filled: usize,
-    /// Where processing writes, before it is copied back.
-    scratch: [f32; CHUNK],
     /// The microphone's clock, for its latency.
     input: Option<fastframe_audio::Clock>,
     /// The reference's and the microphone's energy since the last report, for the log's levels.
@@ -255,20 +253,13 @@ impl Canceller {
         input: Option<fastframe_audio::Clock>,
         stages: Stages,
     ) -> Self {
-        let stream = StreamConfig::new(RATE, 1);
-        let processing = AudioProcessing::builder()
-            .config(config(stages))
-            .capture_config(stream)
-            .render_config(stream)
-            .build();
         Self {
-            processing,
+            chain: Chain::new(&settings(stages)),
             far_end,
             generation: 0,
             down: Downsampler::new(RATE),
             render: [0.0; CHUNK],
             filled: 0,
-            scratch: [0.0; CHUNK],
             input,
             reference: Level::default(),
             capture: Level::default(),
@@ -284,20 +275,13 @@ impl Canceller {
     /// Takes the far end's echo out of one chunk of the microphone, in place.
     pub(crate) fn process(&mut self, chunk: &mut [f32; CHUNK]) {
         let delay_ms = self.listen();
-        // Only a hint, for where the canceller starts looking: it finds the delay itself.
-        let _ = self.processing.set_stream_delay_ms(delay_ms);
         self.capture.add(chunk);
         if let Some(dump) = &mut self.dump {
             dump.microphone(chunk, self.fed, delay_ms);
         }
         self.fed = 0;
-        if self
-            .processing
-            .process_capture_f32(&[&chunk[..]], &mut [&mut self.scratch[..]])
-            .is_ok()
-        {
-            chunk.copy_from_slice(&self.scratch);
-        }
+        // The delay is only a hint, for where the canceller starts looking: it finds it itself.
+        self.chain.capture(chunk, Some(delay_ms));
         if let Some(dump) = &mut self.dump {
             dump.output(chunk);
         }
@@ -342,11 +326,10 @@ impl Canceller {
         };
         let (first, second) = read.as_slices();
         let Self {
-            processing,
+            chain,
             down,
             render,
             filled,
-            scratch,
             reference,
             dump,
             fed,
@@ -363,7 +346,7 @@ impl Canceller {
                     if let Some(dump) = dump.as_mut() {
                         dump.reference(&render[..]);
                     }
-                    let _ = processing.process_render_f32(&[&render[..]], &mut [&mut scratch[..]]);
+                    chain.render(&render[..]);
                 }
             });
         }
@@ -375,16 +358,9 @@ impl Canceller {
     /// the reference comes from, and the reference's and the microphone's levels since the last
     /// report, for the log: numbers about the signal, never the signal.
     pub(crate) fn report(&mut self) -> String {
-        let stats = self.processing.statistics();
-        let decibels =
-            |value: Option<f64>| value.map_or("unknown".to_owned(), |v| format!("{v:.1} dB"));
+        let (erle, erl, delay) = self.chain.metrics();
         format!(
-            "echo reduced {}, echo return loss {}, delay {}, speaker stream {}, reference {}, microphone {}",
-            decibels(stats.echo_return_loss_enhancement),
-            decibels(stats.echo_return_loss),
-            stats
-                .delay_ms
-                .map_or("unknown".to_owned(), |delay| format!("{delay} ms")),
+            "echo reduced {erle:.1} dB, echo return loss {erl:.1} dB, delay {delay} ms, speaker stream {}, reference {}, microphone {}",
             if self.generation == 0 {
                 "none yet".to_owned()
             } else {
@@ -666,32 +642,19 @@ mod tests {
             "the microphone as it came in"
         );
         let order = std::fs::read_to_string(order).expect("the order");
-        let stream = StreamConfig::new(RATE, 1);
-        let mut replay = AudioProcessing::builder()
-            .config(call_config())
-            .capture_config(stream)
-            .render_config(stream)
-            .build();
-        let mut scratch = [0.0_f32; CHUNK];
+        let mut replay = Chain::new(&ChainSettings::call());
         let mut fed = 0;
         let mut replayed = Vec::new();
         for (index, line) in order.lines().skip(1).enumerate() {
             let (count, hint) = line.split_once(',').expect("two fields");
             for _ in 0..count.parse::<usize>().expect("a count") {
                 let chunk = &reference[fed * CHUNK..(fed + 1) * CHUNK];
-                replay
-                    .process_render_f32(&[chunk], &mut [&mut scratch[..]])
-                    .expect("rendered");
+                replay.render(chunk);
                 fed += 1;
             }
-            let _ = replay.set_stream_delay_ms(hint.parse().expect("a hint"));
-            replay
-                .process_capture_f32(
-                    &[&microphone[index * CHUNK..(index + 1) * CHUNK]],
-                    &mut [&mut scratch[..]],
-                )
-                .expect("processed");
-            replayed.extend_from_slice(&scratch);
+            let mut chunk = microphone[index * CHUNK..(index + 1) * CHUNK].to_vec();
+            replay.capture(&mut chunk, Some(hint.parse().expect("a hint")));
+            replayed.extend_from_slice(&chunk);
         }
         assert_eq!(
             fed * CHUNK,
@@ -703,6 +666,137 @@ mod tests {
             replayed, output,
             "the replay is the call's output, sample for sample"
         );
+    }
+
+    /// A recording of a real call with desk speakers in an untreated room, replayed through the
+    /// call's chain: in its far-end-only seconds the output must be far below the microphone,
+    /// and a voice mixed into the microphone must still come through.
+    ///
+    /// The recording is of real voices, so it is never in the repository: set
+    /// `ZAPFAST_ECHO_RECORDING` to a dump's `…-reference.wav` (`ZAPFAST_CALL_AUDIO_DUMP`) and
+    /// `ZAPFAST_ECHO_RECORDING_SECONDS` to its far-end-only seconds (`0-25` by default). Without
+    /// the variable the test passes without looking at anything.
+    #[test]
+    fn a_recorded_room_echo_is_taken_out() {
+        let Some(path) = std::env::var_os("ZAPFAST_ECHO_RECORDING") else {
+            println!("ZAPFAST_ECHO_RECORDING is not set; nothing to replay");
+            return;
+        };
+        let seconds =
+            std::env::var("ZAPFAST_ECHO_RECORDING_SECONDS").unwrap_or_else(|_| "0-25".to_owned());
+        let (from, to) = seconds
+            .split_once('-')
+            .map(|(a, b)| {
+                (
+                    a.parse::<usize>().expect("a second"),
+                    b.parse::<usize>().expect("a second"),
+                )
+            })
+            .expect("<from>-<to>");
+        let [reference, microphone, _, order] =
+            super::super::dump::siblings(std::path::Path::new(&path)).expect("a dump's files");
+        let read = |path| super::super::dump::read_wav(path).expect("a WAV file").1;
+        let (reference, microphone) = (read(&reference), read(&microphone));
+        let order: Vec<(usize, i32)> = std::fs::read_to_string(order)
+            .expect("the order")
+            .lines()
+            .skip(1)
+            .map(|line| {
+                let (count, hint) = line.split_once(',').expect("two fields");
+                (
+                    count.parse().expect("a count"),
+                    hint.parse().expect("a hint"),
+                )
+            })
+            .collect();
+        let second = RATE as usize;
+        let chunks = order
+            .len()
+            .min(microphone.len() / CHUNK)
+            .min(to * second / CHUNK);
+        let near = speech((chunks * CHUNK) as f32 / RATE as f32, 31, 210.0);
+        let near_level = (energy(&near) / near.len() as f64).sqrt();
+        // A voice at -45 dBFS, as loud as the live one in the recording, two seconds on and two off.
+        let near: Vec<f32> = near
+            .iter()
+            .enumerate()
+            .map(|(index, s)| {
+                let at = index / second;
+                if at >= from && (at - from) % 4 < 2 {
+                    s * (10f64.powf(-45.0 / 20.0) / near_level) as f32
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let replay = |with_near: bool| {
+            let mut settings = ChainSettings::call();
+            // The level control raises the voice; the canceller is what is measured here.
+            settings.gain_control = false;
+            let mut chain = Chain::new(&settings);
+            let mut fed = 0;
+            let mut out = Vec::with_capacity(chunks * CHUNK);
+            for (index, (count, hint)) in order.iter().take(chunks).enumerate() {
+                for _ in 0..*count {
+                    if let Some(chunk) = reference.get(fed * CHUNK..(fed + 1) * CHUNK) {
+                        chain.render(chunk);
+                    }
+                    fed += 1;
+                }
+                let span = index * CHUNK..(index + 1) * CHUNK;
+                let mut chunk: Vec<f32> = microphone[span.clone()].to_vec();
+                if with_near {
+                    for (sample, n) in chunk.iter_mut().zip(&near[span]) {
+                        *sample += n;
+                    }
+                }
+                chain.capture(&mut chunk, Some(*hint));
+                out.extend_from_slice(&chunk);
+            }
+            out
+        };
+        let out = replay(false);
+        let with = replay(true);
+        // Seconds where the peer is heard: the reference fed in them is above -32 dBFS.
+        let mut fed_before = vec![0_usize; chunks + 1];
+        for (index, (count, _)) in order.iter().take(chunks).enumerate() {
+            fed_before[index + 1] = fed_before[index] + count;
+        }
+        let mut reductions = Vec::new();
+        for at in from..chunks * CHUNK / second {
+            let (first, last) = (fed_before[at * 100], fed_before[(at + 1) * 100]);
+            let heard = &reference[first * CHUNK..(last * CHUNK).min(reference.len())];
+            if heard.is_empty() || db(energy(heard) / heard.len() as f64) <= -32.0 {
+                continue;
+            }
+            let span = at * second..(at + 1) * second;
+            reductions.push(db(energy(&microphone[span.clone()]) / energy(&out[span])));
+        }
+        assert!(
+            !reductions.is_empty(),
+            "the recording has far-end speech to score"
+        );
+        let mut sorted = reductions.clone();
+        sorted.sort_by(f64::total_cmp);
+        let mean = reductions.iter().sum::<f64>() / reductions.len() as f64;
+        let median = sorted[sorted.len() / 2];
+        let passed: Vec<f32> = with.iter().zip(&out).map(|(w, o)| w - o).collect();
+        let kept = db(energy(&passed) / energy(&near[..passed.len()]));
+        println!(
+            "recorded room: {} far-end seconds, output below the microphone by {mean:.1} dB on average, {median:.1} dB at the median; a voice mixed in kept at {kept:+.1} dB",
+            reductions.len()
+        );
+        assert!(
+            mean >= 22.0,
+            "the echo came down only {mean:.1} dB on average"
+        );
+        assert!(
+            median >= 25.0,
+            "the echo came down only {median:.1} dB at the median"
+        );
+        // The stock settings keep it at -1.7 dB and take out 11 dB: the suppressor that takes out
+        // this room's tail costs a voice talking over it a few decibels.
+        assert!(kept > -6.0, "our voice came out {kept:.1} dB quieter");
     }
 
     #[test]
