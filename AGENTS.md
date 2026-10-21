@@ -9,6 +9,14 @@ protocol. These notes are for coding agents and new contributors.
 - Keep it a small native client. No browser engine, no telemetry, no
   hosted backend, no ZapFast-operated account system. Features never send
   message content to a third party.
+- No automation, ever. ZapFast is for a person reading and writing their
+  own chats by hand. It will not have bots, an MCP server, or any API,
+  command-line, plugin or scripting interface that reads, exports or sends
+  messages for another program, nor scheduled, bulk or automatic replies.
+  WhatsApp's terms forbid automated use, and it bans accounts for it, so such
+  a feature would put every user's account at risk. Opening a chat from a
+  link or `zapfast <number>`, which only shows the chat to the person, is
+  not automation.
 - Do not copy dependency source into this repository. For a dependency fix,
   use a fork under `github.com/crmne/` pinned to a commit and contribute the
   fix upstream; egui, winit and rodio already come from such
