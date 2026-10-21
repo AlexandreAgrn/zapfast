@@ -165,7 +165,20 @@ protocol. These notes are for coding agents and new contributors.
   `src/call_audio.rs` bridges the engine's 16 kHz frames to a
   fastframe-audio microphone and a speaker output of the call's own behind
   stable channels, so a device change rebinds a stream instead of the call;
-  its pickers list and open devices by the system's id (`DeviceId`). `backend/worker/calls.rs` owns at most one
+  its pickers list and open devices by the system's id (`DeviceId`).
+  `call_audio/echo.rs` cancels the speaker's echo from the microphone with
+  sonora (WebRTC's AEC3, noise suppression and AGC2 ported to Rust, so no
+  C++ or system library): the call's `MixOutput` hands every block it plays
+  to a `Monitor` (`echo::Tap`) that mixes it mono into an `rtrb` ring on the
+  audio thread, never waiting or allocating, and the microphone's reading
+  thread drains it and runs both sides in 10 ms chunks at 16 kHz before
+  packing the engine's frames. The reference is taken as played, not as the
+  engine queued it, so the queue's depth never shifts the alignment; the
+  devices' reported latencies are only AEC3's starting hint, and it finds the
+  delay itself. One `FarEnd` per call links the two sides across device
+  changes. AGC2 applies digital gain only, from 0 up to 20 dB (normalize's
+  cap), never the system's microphone volume. Headphones need no setting:
+  AEC3's transparent mode stops suppressing when it hears no echo. `backend/worker/calls.rs` owns at most one
   call per account; the window (`app/calls.rs`) holds one call across all
   accounts with its `AccountId`, routes call actions to that account's
   backend, and declines another account's offer while one is up.

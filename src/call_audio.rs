@@ -8,6 +8,10 @@
 //! The engine's channel stays stable while a device is chosen or lost, and only the reader or the
 //! writer behind it is replaced.
 //!
+//! What the microphone hears of the speaker is taken back out before the engine gets it
+//! ([`echo`]): the speaker's output hands the far end's voice, as it plays it, to the microphone
+//! side's echo canceller through a [`FarEnd`] the two share.
+//!
 //! Devices are picked by the system's own id for them (fastframe-audio's `DeviceId`), which stays
 //! the same when a device is renamed and tells apart two devices with the same name; the picker
 //! shows their names.
@@ -19,6 +23,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rodio::buffer::SamplesBuffer;
+
+pub mod echo;
+
+pub use echo::FarEnd;
 
 /// The engine's audio clock: 16 kHz mono.
 pub const RATE: u32 = 16_000;
@@ -81,6 +89,8 @@ const RETRY: Duration = Duration::from_millis(500);
 const BACKOFF: Duration = Duration::from_millis(5);
 /// How long a microphone may deliver nothing before it is taken for gone and reopened.
 const MIC_SILENT: Duration = Duration::from_secs(1);
+/// How often the echo canceller says in the log how much echo it takes out.
+const ECHO_REPORT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // Conversion
@@ -130,6 +140,10 @@ struct Converter {
     layout: Layout,
     /// Samples at [`RATE`] not yet packed into a frame.
     pending: Vec<f32>,
+    /// Takes the speaker's echo out, a chunk at a time, before samples are packed.
+    canceller: Option<echo::Canceller>,
+    /// Samples at [`RATE`] not yet a whole chunk for the canceller.
+    raw: Vec<f32>,
 }
 
 impl Converter {
@@ -137,7 +151,15 @@ impl Converter {
         Self {
             layout: Layout { rate, channels },
             pending: Vec::new(),
+            canceller: None,
+            raw: Vec::with_capacity(2 * echo::CHUNK),
         }
+    }
+
+    /// Runs every chunk through `canceller` before it is packed into frames.
+    fn cancelling(mut self, canceller: echo::Canceller) -> Self {
+        self.canceller = Some(canceller);
+        self
     }
 
     /// The interleaved samples one read should pull: one block of them.
@@ -149,8 +171,21 @@ impl Converter {
     /// Converts interleaved device samples and appends every whole engine frame to `out`.
     fn push(&mut self, interleaved: &[f32], out: &mut Vec<Vec<i16>>) {
         let mono = mono(interleaved, self.layout.channels);
-        self.pending
-            .extend_from_slice(&resample(&mono, self.layout.rate, RATE));
+        let at_rate = resample(&mono, self.layout.rate, RATE);
+        match &mut self.canceller {
+            Some(canceller) => {
+                self.raw.extend_from_slice(&at_rate);
+                let (whole, left) = self.raw.as_chunks_mut::<{ echo::CHUNK }>();
+                let left = left.len();
+                for chunk in whole {
+                    canceller.process(chunk);
+                    self.pending.extend_from_slice(chunk);
+                }
+                let done = self.raw.len() - left;
+                self.raw.drain(..done);
+            }
+            None => self.pending.extend_from_slice(&at_rate),
+        }
         while self.pending.len() >= FRAME_SAMPLES {
             out.push(
                 self.pending
@@ -341,6 +376,15 @@ impl Mic {
         }
     }
 
+    /// The device's clock, for the latency the echo canceller allows for.
+    fn clock(&self) -> Option<fastframe_audio::Clock> {
+        match self {
+            Mic::Real(microphone) => Some(microphone.clock()),
+            #[cfg(test)]
+            Mic::Fake(_) => None,
+        }
+    }
+
     /// Whether the stream stopped recording what the reader expects (#507), so it reopens it.
     fn failed(&mut self) -> bool {
         match self {
@@ -409,7 +453,7 @@ enum Sink {
     Fake(fake::Speaker),
 }
 
-fn open_sink(device: Option<&str>) -> Result<Sink, String> {
+fn open_sink(device: Option<&str>, far_end: &FarEnd) -> Result<Sink, String> {
     #[cfg(test)]
     if let Some(speaker) = fake::open_speaker(device) {
         return Ok(Sink::Fake(speaker));
@@ -427,8 +471,10 @@ fn open_sink(device: Option<&str>) -> Result<Sink, String> {
         }
         None => fastframe_audio::Device::Default,
     };
-    let output = crate::audio::MixOutput::open(target, None, true)
+    let tap: Box<dyn crate::audio::Monitor> = Box::new(far_end.tap());
+    let output = crate::audio::MixOutput::open(target, None, true, Some(tap))
         .map_err(|error| format!("the speaker could not be opened: {error}"))?;
+    far_end.played_through(output.clock());
     Ok(Sink::real(output))
 }
 
@@ -524,7 +570,11 @@ pub struct AudioInput {
 }
 
 impl AudioInput {
-    pub fn spawn(target: Option<String>) -> (Self, async_channel::Receiver<Vec<i16>>) {
+    /// Starts the microphone, cancelling the echo of what the call's speaker plays into `far_end`.
+    pub fn spawn(
+        target: Option<String>,
+        far_end: &FarEnd,
+    ) -> (Self, async_channel::Receiver<Vec<i16>>) {
         let (out, rx) = async_channel::bounded::<Vec<i16>>(4);
         // Unbounded so a device the user picks while the pump is busy is never dropped: a capacity
         // of one would silently discard the newer selection when two arrive before the pump reads
@@ -541,6 +591,7 @@ impl AudioInput {
             fell,
             target.clone(),
             Arc::clone(&opens),
+            far_end.clone(),
         ));
         (
             Self {
@@ -571,10 +622,11 @@ async fn mic_pump(
     fell: async_channel::Sender<()>,
     initial: Option<String>,
     opens: Arc<AtomicUsize>,
+    far_end: FarEnd,
 ) {
     let mut target = initial;
     loop {
-        let reader = match MicReader::start(target.as_deref()) {
+        let reader = match MicReader::start(target.as_deref(), &far_end) {
             Ok(reader) => {
                 opens.fetch_add(1, Ordering::Relaxed);
                 reader
@@ -648,18 +700,21 @@ struct MicReader {
 }
 
 impl MicReader {
-    fn start(device: Option<&str>) -> Result<Self, String> {
+    fn start(device: Option<&str>, far_end: &FarEnd) -> Result<Self, String> {
         let (tx, rx) = async_channel::bounded::<Vec<i16>>(4);
         let stop = Arc::new(AtomicBool::new(false));
         let delivered = Arc::new(AtomicBool::new(false));
         let (ready, opened) = std::sync::mpsc::channel::<Result<(), String>>();
         let name = device.map(str::to_owned);
+        let far_end = far_end.clone();
         let thread = {
             let stop = Arc::clone(&stop);
             let delivered = Arc::clone(&delivered);
             std::thread::Builder::new()
                 .name("call-microphone".to_owned())
-                .spawn(move || read_microphone(name.as_deref(), &tx, &stop, &delivered, &ready))
+                .spawn(move || {
+                    read_microphone(name.as_deref(), &tx, &stop, &delivered, &ready, far_end)
+                })
                 .map_err(|error| format!("the microphone thread could not start: {error}"))?
         };
         match opened.recv() {
@@ -695,6 +750,7 @@ fn read_microphone(
     stop: &AtomicBool,
     delivered: &AtomicBool,
     ready: &std::sync::mpsc::Sender<Result<(), String>>,
+    far_end: FarEnd,
 ) {
     let mut microphone = match open_microphone(device) {
         Ok(microphone) => {
@@ -706,10 +762,19 @@ fn read_microphone(
             return;
         }
     };
-    let mut converter = Converter::new(microphone.channels(), microphone.rate());
+    let canceller = echo::Canceller::new(far_end, microphone.clock(), echo::Stages::All);
+    let mut converter =
+        Converter::new(microphone.channels(), microphone.rate()).cancelling(canceller);
     let mut block = vec![0.0_f32; converter.block()];
     let mut frames = Vec::new();
+    let mut reported = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if reported.elapsed() >= ECHO_REPORT {
+            reported = Instant::now();
+            if let Some(canceller) = &converter.canceller {
+                log::info!("[CALL] echo canceller: {}", canceller.report());
+            }
+        }
         if microphone.failed() {
             // The pump opens another once this returns; the wait keeps a device that fails every
             // stream from being reopened in a loop.
@@ -777,7 +842,12 @@ pub struct AudioOutput {
 }
 
 impl AudioOutput {
-    pub fn spawn(target: Option<String>) -> (Self, async_channel::Sender<Vec<i16>>) {
+    /// Starts the speaker, handing what it plays to `far_end` for the microphone's echo
+    /// canceller.
+    pub fn spawn(
+        target: Option<String>,
+        far_end: &FarEnd,
+    ) -> (Self, async_channel::Sender<Vec<i16>>) {
         let (tx, rx) = async_channel::bounded::<Vec<i16>>(SPEAKER_QUEUE);
         // Unbounded for the same reason the microphone's is: a newer device selection must not be
         // dropped because the previous one has not been read yet.
@@ -798,6 +868,7 @@ impl AudioOutput {
                 restarts: Arc::clone(&restarts),
                 relink: Arc::clone(&relink),
             },
+            far_end.clone(),
         ));
         (
             Self {
@@ -872,6 +943,7 @@ async fn play_pump(
     fell: async_channel::Sender<()>,
     initial: Option<String>,
     health: SpeakerHealth,
+    far_end: FarEnd,
 ) {
     let SpeakerHealth {
         opens,
@@ -884,7 +956,7 @@ async fn play_pump(
     // counts a device that is not there rather than a busy one.
     let mut unplayed = 0_usize;
     loop {
-        let writer = match SpkWriter::start(target.as_deref(), Arc::clone(&relink)) {
+        let writer = match SpkWriter::start(target.as_deref(), Arc::clone(&relink), &far_end) {
             Ok(writer) => {
                 opens.fetch_add(1, Ordering::Relaxed);
                 writer
@@ -1008,7 +1080,11 @@ struct SpkWriter {
 }
 
 impl SpkWriter {
-    fn start(device: Option<&str>, relink: Arc<Mutex<Option<Instant>>>) -> Result<Self, String> {
+    fn start(
+        device: Option<&str>,
+        relink: Arc<Mutex<Option<Instant>>>,
+        far_end: &FarEnd,
+    ) -> Result<Self, String> {
         let (tx, rx) = async_channel::bounded::<Vec<i16>>(SPEAKER_QUEUE);
         let stop = Arc::new(AtomicBool::new(false));
         let accepted = Arc::new(AtomicBool::new(false));
@@ -1016,6 +1092,7 @@ impl SpkWriter {
         let played = Arc::new(AtomicBool::new(false));
         let (ready, opened) = std::sync::mpsc::channel::<Result<(), String>>();
         let name = device.map(str::to_owned);
+        let far_end = far_end.clone();
         let thread = {
             let stop = Arc::clone(&stop);
             let accepted = Arc::clone(&accepted);
@@ -1035,6 +1112,7 @@ impl SpkWriter {
                         },
                         &relink,
                         &ready,
+                        &far_end,
                     )
                 })
                 .map_err(|error| format!("the speaker thread could not start: {error}"))?
@@ -1093,13 +1171,14 @@ fn write_speaker(
     flags: SpeakerFlags<'_>,
     relink: &Mutex<Option<Instant>>,
     ready: &std::sync::mpsc::Sender<Result<(), String>>,
+    far_end: &FarEnd,
 ) {
     let SpeakerFlags {
         accepted,
         stalled,
         played,
     } = flags;
-    let mut sink = match open_sink(device) {
+    let mut sink = match open_sink(device, far_end) {
         Ok(sink) => {
             let _ = ready.send(Ok(()));
             sink
@@ -1512,6 +1591,44 @@ mod tests {
     }
 
     #[test]
+    fn the_echo_canceller_keeps_whole_engine_frames_at_any_device_rate() {
+        for (rate, channels) in [(48_000_u32, 2_u16), (44_100, 1), (16_000, 1)] {
+            let canceller = echo::Canceller::new(FarEnd::new(), None, echo::Stages::All);
+            let mut converter = Converter::new(channels, rate).cancelling(canceller);
+            let mut frames = Vec::new();
+            // Three seconds in reads of uneven length, as a device hands them over.
+            let total = rate as usize * 3 * usize::from(channels);
+            let mut sent = 0;
+            let mut sizes = [7_usize, 333, 1_024, 4_801].iter().cycle();
+            while sent < total {
+                let size =
+                    (sizes.next().expect("cycles") * usize::from(channels)).min(total - sent);
+                let block: Vec<f32> = (sent..sent + size)
+                    .map(|index| ((index / usize::from(channels)) as f32 * 0.05).sin() * 0.3)
+                    .collect();
+                converter.push(&block, &mut frames);
+                sent += size;
+            }
+            assert!(frames.iter().all(|frame| frame.len() == FRAME_SAMPLES));
+            let produced =
+                frames.len() * FRAME_SAMPLES + converter.pending.len() + converter.raw.len();
+            // Linear resampling block by block may round a sample per read away.
+            assert!(
+                produced.abs_diff(RATE as usize * 3) <= 200,
+                "{rate} Hz: {produced} samples at the call rate for three seconds"
+            );
+            assert!(
+                converter.raw.len() < echo::CHUNK,
+                "less than a chunk is held back"
+            );
+            assert!(
+                frames.iter().flatten().any(|sample| *sample != 0),
+                "{rate} Hz: our voice still reaches the engine"
+            );
+        }
+    }
+
+    #[test]
     fn stereo_device_audio_is_mixed_before_it_is_resampled() {
         let mut converter = Converter::new(2, 48_000);
         assert_eq!(converter.block(), 1_920, "20 ms of two channels");
@@ -1580,7 +1697,7 @@ mod tests {
         // rather than silence nobody could tell from a dead device.
         let samples: Vec<f32> = (0..960).map(|sample| sample as f32 / 1_920.0).collect();
         let (_devices, _speaker) = fake::install(samples, 2, 48_000, (48_000, 2));
-        let (input, frames) = AudioInput::spawn(None);
+        let (input, frames) = AudioInput::spawn(None, &FarEnd::new());
         let mut got: Vec<Vec<i16>> = Vec::new();
         let started = Instant::now();
         while got.len() < 5 && started.elapsed() < Duration::from_secs(5) {
@@ -1610,7 +1727,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn engine_frames_reach_a_test_speaker_at_its_own_shape() {
         let (_devices, speaker) = fake::install(vec![0.0; 8], 1, RATE, (48_000, 2));
-        let (output, tx) = AudioOutput::spawn(None);
+        let (output, tx) = AudioOutput::spawn(None, &FarEnd::new());
         let frame: Vec<i16> = (0..FRAME_SAMPLES)
             .map(|at| (at % 101) as i16 * 30)
             .collect();
@@ -1644,7 +1761,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_device_change_rebinds_the_speaker_and_keeps_the_engine_channel() {
         let (_devices, speaker) = fake::install(vec![0.0; 8], 1, RATE, (48_000, 2));
-        let (output, tx) = AudioOutput::spawn(None);
+        let (output, tx) = AudioOutput::spawn(None, &FarEnd::new());
         let frame = vec![100_i16; FRAME_SAMPLES];
         let started = Instant::now();
         while speaker.opened_count() < 1 && started.elapsed() < Duration::from_secs(5) {
@@ -1708,7 +1825,7 @@ mod tests {
         // Hold the pump inside its first open long enough for two selections to be sent while it
         // cannot read them.
         speaker.open_pause.store(400, Ordering::Relaxed);
-        let (output, _tx) = AudioOutput::spawn(None);
+        let (output, _tx) = AudioOutput::spawn(None, &FarEnd::new());
         tokio::time::sleep(Duration::from_millis(80)).await;
         output.bind(Some("First".to_owned()));
         output.bind(Some("Second".to_owned()));
@@ -1738,7 +1855,7 @@ mod tests {
         let (_devices, speaker) = fake::install(vec![0.0; 8], 1, RATE, (RATE, 1));
         // Nothing plays yet, which is what a device still coming up looks like.
         speaker.drains.store(false, Ordering::Relaxed);
-        let (output, tx) = AudioOutput::spawn(None);
+        let (output, tx) = AudioOutput::spawn(None, &FarEnd::new());
         let frame = vec![100_i16; FRAME_SAMPLES];
         // Well past the stall window that used to decide, and inside the start-up one.
         let started = Instant::now();
@@ -1781,7 +1898,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_relink_does_not_let_the_call_tear_down_its_own_audio() {
         let (_devices, speaker) = fake::install(vec![0.0; 8], 1, RATE, (RATE, 1));
-        let (output, tx) = AudioOutput::spawn(None);
+        let (output, tx) = AudioOutput::spawn(None, &FarEnd::new());
         let frame = vec![100_i16; FRAME_SAMPLES];
         let started = Instant::now();
         while speaker.played_count() < 2 && started.elapsed() < Duration::from_secs(5) {
@@ -1827,7 +1944,8 @@ mod tests {
     async fn a_device_that_never_plays_is_given_up_for_the_default() {
         let (_devices, speaker) = fake::install(vec![0.0; 8], 1, RATE, (RATE, 1));
         speaker.drains.store(false, Ordering::Relaxed);
-        let (output, tx) = AudioOutput::spawn(Some("A speaker that is gone".to_owned()));
+        let (output, tx) =
+            AudioOutput::spawn(Some("A speaker that is gone".to_owned()), &FarEnd::new());
         let frame = vec![100_i16; FRAME_SAMPLES];
         let started = Instant::now();
         while !speaker.opened().iter().any(Option::is_none)
@@ -1860,7 +1978,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_speaker_that_played_and_then_stopped_is_restarted_quickly() {
         let (_devices, speaker) = fake::install(vec![0.0; 8], 1, RATE, (RATE, 1));
-        let (output, tx) = AudioOutput::spawn(None);
+        let (output, tx) = AudioOutput::spawn(None, &FarEnd::new());
         let frame = vec![100_i16; FRAME_SAMPLES];
         let started = Instant::now();
         while speaker.played_count() < 2 && started.elapsed() < Duration::from_secs(5) {
@@ -1901,7 +2019,7 @@ mod tests {
         let (_devices, speaker) = fake::install(vec![0.0; 8], 1, RATE, (48_000, 2));
         // A device that takes frames and never plays them: its position never moves.
         speaker.drains.store(false, Ordering::Relaxed);
-        let (output, tx) = AudioOutput::spawn(None);
+        let (output, tx) = AudioOutput::spawn(None, &FarEnd::new());
         let frame = vec![100_i16; FRAME_SAMPLES];
         let started = Instant::now();
         while speaker.opened_count() < 2 && started.elapsed() < Duration::from_secs(10) {
@@ -1929,7 +2047,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_failing_speaker_stream_is_reopened() {
         let (_devices, speaker) = fake::install(vec![0.0; 8], 1, RATE, (48_000, 2));
-        let (output, tx) = AudioOutput::spawn(None);
+        let (output, tx) = AudioOutput::spawn(None, &FarEnd::new());
         let frame = vec![100_i16; FRAME_SAMPLES];
         let started = Instant::now();
         while speaker.played_count() == 0 && started.elapsed() < Duration::from_secs(5) {
@@ -1972,7 +2090,7 @@ mod tests {
             std::iter::once(None).chain(microphones.iter().map(|(id, _)| Some(id.clone())));
         let mut tried: Vec<(Option<String>, usize)> = Vec::new();
         for target in choices {
-            let (input, frames) = AudioInput::spawn(target.clone());
+            let (input, frames) = AudioInput::spawn(target.clone(), &FarEnd::new());
             let started = Instant::now();
             let mut heard = 0;
             while started.elapsed() < Duration::from_millis(600) {
@@ -1995,7 +2113,7 @@ mod tests {
 
         // The speaker side: send a second of silence through the engine's own channel and check
         // the writer took it on the default output rather than falling back to another device.
-        let (output, frames) = AudioOutput::spawn(None);
+        let (output, frames) = AudioOutput::spawn(None, &FarEnd::new());
         for _ in 0..16 {
             frames
                 .send(vec![0_i16; FRAME_SAMPLES])

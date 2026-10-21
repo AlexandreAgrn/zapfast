@@ -1832,8 +1832,9 @@ impl Call {
             // The camera, if one started, is released as the pipeline drops.
             return Err(Cancelled.into());
         }
-        let (mic, mic_rx) = AudioInput::spawn(microphone.clone());
-        let (output, output_tx) = AudioOutput::spawn(speaker.clone());
+        let far_end = crate::call_audio::FarEnd::new();
+        let (mic, mic_rx) = AudioInput::spawn(microphone.clone(), &far_end);
+        let (output, output_tx) = AudioOutput::spawn(speaker.clone(), &far_end);
 
         let voip = client.voip();
         let builder = voip.call(&peer).audio(mic_rx, output_tx);
@@ -1965,8 +1966,9 @@ impl Call {
         if cancel.load(Ordering::Relaxed) {
             return Err(Cancelled.into());
         }
-        let (mic, mic_rx) = AudioInput::spawn(None);
-        let (output, output_tx) = AudioOutput::spawn(None);
+        let far_end = crate::call_audio::FarEnd::new();
+        let (mic, mic_rx) = AudioInput::spawn(None, &far_end);
+        let (output, output_tx) = AudioOutput::spawn(None, &far_end);
         let endpoints = pipe
             .as_ref()
             .map(|(pipeline, _)| (pipeline.source(), pipeline.sink()));
@@ -2060,8 +2062,9 @@ impl Call {
         if cancel.load(Ordering::Relaxed) {
             return Err(Cancelled.into());
         }
-        let (mic, mic_rx) = AudioInput::spawn(None);
-        let (output, output_tx) = AudioOutput::spawn(None);
+        let far_end = crate::call_audio::FarEnd::new();
+        let (mic, mic_rx) = AudioInput::spawn(None, &far_end);
+        let (output, output_tx) = AudioOutput::spawn(None, &far_end);
         let endpoints = pipe
             .as_ref()
             .map(|(pipeline, _)| (pipeline.source(), pipeline.sink()));
@@ -2453,8 +2456,9 @@ impl Call {
             }
         }
         require_video(self.video, pipe.is_some())?;
-        let (mic, mic_rx) = AudioInput::spawn(microphone.clone());
-        let (output, output_tx) = AudioOutput::spawn(speaker.clone());
+        let far_end = crate::call_audio::FarEnd::new();
+        let (mic, mic_rx) = AudioInput::spawn(microphone.clone(), &far_end);
+        let (output, output_tx) = AudioOutput::spawn(speaker.clone(), &far_end);
 
         let voip = client.voip();
         // From here the library owns the answer: if it fails, its own guard ends the call with the
@@ -3510,8 +3514,8 @@ mod tests {
         let samples: Vec<f32> = (0..960).map(|sample| sample as f32 / 1_920.0).collect();
         let (_devices, speaker) = crate::call_audio::fake::install(samples, 2, 48_000, (48_000, 2));
         let mut call = dialing();
-        let (input, frames) = AudioInput::spawn(None);
-        let (output, _tx) = AudioOutput::spawn(None);
+        let (input, frames) = AudioInput::spawn(None, &crate::call_audio::FarEnd::new());
+        let (output, _tx) = AudioOutput::spawn(None, &crate::call_audio::FarEnd::new());
         call.mic = Some(input);
         call.speaker = Some(output);
 
@@ -3590,7 +3594,7 @@ mod tests {
         let (_devices, _speaker) =
             crate::call_audio::fake::install(samples, 2, 48_000, (48_000, 2));
         let mut call = dialing();
-        let (output, _frames) = AudioOutput::spawn(None);
+        let (output, _frames) = AudioOutput::spawn(None, &crate::call_audio::FarEnd::new());
         call.speaker = Some(output);
         call.video = true;
         call.video_pipe = Some(pipeline_with_a_running_camera());
@@ -3656,7 +3660,7 @@ mod tests {
         let samples: Vec<f32> = (0..960).map(|sample| sample as f32 / 1_920.0).collect();
         let (_devices, _speaker) =
             crate::call_audio::fake::install(samples, 2, 48_000, (48_000, 2));
-        let (input, frames) = AudioInput::spawn(None);
+        let (input, frames) = AudioInput::spawn(None, &crate::call_audio::FarEnd::new());
         let mut heard: Vec<Vec<i16>> = Vec::new();
         let mut quiet: Vec<Vec<i16>> = Vec::new();
         let mut microphone_while_muted: Vec<i16> = Vec::new();
@@ -3736,8 +3740,8 @@ mod tests {
         let samples: Vec<f32> = (0..960).map(|sample| sample as f32 / 1_920.0).collect();
         let (_devices, speaker) = crate::call_audio::fake::install(samples, 2, 48_000, (48_000, 2));
         let mut call = dialing();
-        let (input, frames) = AudioInput::spawn(None);
-        let (output, _tx) = AudioOutput::spawn(None);
+        let (input, frames) = AudioInput::spawn(None, &crate::call_audio::FarEnd::new());
+        let (output, _tx) = AudioOutput::spawn(None, &crate::call_audio::FarEnd::new());
         call.mic = Some(input);
         call.speaker = Some(output);
         call.signaling(&accept()).expect("the peer answered");
