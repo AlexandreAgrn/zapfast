@@ -1036,6 +1036,53 @@ pub fn highlight_card(ui: &Ui, palette: &Palette, card: Rect, color: Color32) {
     ui.painter().rect_filled(card, radius, color);
 }
 
+/// A round check box for a picking list, as WhatsApp draws one: an outlined
+/// circle in the secondary text colour, the accent with a white check once
+/// picked. It takes no room in the layout, so it can sit on top of its row.
+/// Returns whether it was clicked (never while disabled).
+pub fn round_check(
+    ui: &Ui,
+    palette: &Palette,
+    rect: Rect,
+    key: &str,
+    checked: bool,
+    enabled: bool,
+    label: &str,
+) -> bool {
+    let id = ui.id().with(("round-check", key));
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let response = ui.interact(rect, id, sense);
+    theme::reveal_focus(&response);
+    theme::focus_outline(ui, id, rect.expand(3.0), rect.width() / 2.0 + 3.0);
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, checked, label)
+    });
+    if ui.is_rect_visible(rect) {
+        let radius = rect.width() / 2.0 - 1.0;
+        if checked {
+            ui.painter()
+                .circle_filled(rect.center(), radius, palette.accent);
+            theme::paint_icon(ui, Icon::Check, rect, rect.width() * 0.7, Color32::WHITE);
+        } else {
+            let color = if enabled && response.hovered() {
+                palette.text
+            } else {
+                palette.secondary
+            };
+            ui.painter()
+                .circle_stroke(rect.center(), radius - 0.75, egui::Stroke::new(1.5, color));
+        }
+    }
+    enabled
+        && response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+}
+
 /// The hover behind a row in a dialog's list: flat, since the dialog itself
 /// already floats, with a bubble's corners. It stops two points short of the
 /// row above and below, leaving four between neighbours; at the sides it

@@ -3863,6 +3863,19 @@ impl App {
                     }
                 }
             }
+            Event::NewGroupPicture(result) => match result {
+                Ok(path) => {
+                    if let Some(draft) = self.new_group.as_mut() {
+                        draft.picture = Some(path);
+                    }
+                }
+                Err(_) if live => {
+                    let said = crate::i18n::gettext(self.locale, "Could not use this picture.");
+                    self.toast_error(said.into_owned());
+                }
+                Err(_) => {}
+            },
+            Event::GroupCreated { request, result } => self.group_created(request, result, live),
             Event::ContactFailed { request, error } => {
                 if self.new_contact_request == Some(request) {
                     self.new_contact_request = None;
@@ -7598,6 +7611,7 @@ impl App {
                 self.clear_chat_lock_entry();
                 if dialog == Dialog::NewChat {
                     self.new_chat_search.clear();
+                    self.new_group = None;
                 }
                 self.emoji_start = None;
                 self.mention_start = None;
@@ -7643,6 +7657,8 @@ impl App {
                 self.forward_reviewing = false;
                 self.contact_edit = None;
                 self.group_name_edit = None;
+                // A group on its way still opens once WhatsApp makes it.
+                self.new_group = None;
                 self.refocus_composer(ctx);
             }
             Action::EditContact { id, name } => {
@@ -8126,6 +8142,47 @@ impl App {
                 self.group_name_edit = None;
                 self.backend.send(Command::SetGroupName { chat, name });
             }
+            Action::StartNewGroup => {
+                self.new_chat_search.clear();
+                self.new_group = Some(Default::default());
+            }
+            Action::ToggleNewGroupMember(id) => {
+                let Some(draft) = self.new_group.as_mut() else {
+                    return;
+                };
+                let adding = !draft.picked(&id);
+                if draft.toggle(&id) == crate::new_group::Step::Leave {
+                    self.new_group = None;
+                } else if adding {
+                    // Ready for the next name, as on the phone.
+                    self.new_chat_search.clear();
+                }
+            }
+            Action::NewGroupNext => {
+                if let Some(draft) = self.new_group.as_mut() {
+                    draft.advance();
+                }
+            }
+            Action::NewGroupBack => {
+                if self
+                    .new_group
+                    .as_mut()
+                    .is_some_and(|draft| draft.back() == crate::new_group::Step::Leave)
+                {
+                    self.new_group = None;
+                }
+            }
+            Action::PickNewGroupPicture => {
+                if self.new_group.is_some() {
+                    self.backend.send(Command::PickNewGroupPicture);
+                }
+            }
+            Action::RemoveNewGroupPicture => {
+                if let Some(draft) = self.new_group.as_mut() {
+                    draft.picture = None;
+                }
+            }
+            Action::CreateGroup => self.create_group(),
             Action::PickGroupPicture(chat) => self.backend.send(Command::PickGroupPicture(chat)),
             Action::RemoveGroupPicture(chat) => {
                 self.backend
@@ -8348,6 +8405,79 @@ impl App {
             message,
             parts.next().unwrap_or_default(),
         )
+    }
+
+    /// Sends the group the New chat dialog put together to WhatsApp.
+    fn create_group(&mut self) {
+        let Some(draft) = self.new_group.as_mut() else {
+            return;
+        };
+        if draft.stage != crate::new_group::Stage::Naming || draft.creating {
+            return;
+        }
+        if let Some(problem) = draft.problem() {
+            let said = problem.message(self.locale);
+            self.toast_error(said);
+            return;
+        }
+        draft.creating = true;
+        let subject = draft.subject().to_owned();
+        let members = draft.members.clone();
+        let picture = draft.picture.clone();
+        self.new_group_sequence = self.new_group_sequence.wrapping_add(1);
+        let request = self.new_group_sequence;
+        self.new_group_request = Some(request);
+        self.backend.send(Command::CreateGroup {
+            request,
+            subject,
+            members,
+            picture,
+        });
+    }
+
+    /// WhatsApp answered `CreateGroup`: the new group opens, or the dialog
+    /// says why not and stays for another try. An answer the window no
+    /// longer waits for opens nothing; its group is filed all the same.
+    fn group_created(
+        &mut self,
+        request: u64,
+        result: Result<crate::new_group::Created, crate::new_group::CreateFailure>,
+        live: bool,
+    ) {
+        if self.new_group_request != Some(request) {
+            return;
+        }
+        self.new_group_request = None;
+        match result {
+            Ok(created) => {
+                self.new_group = None;
+                if !live {
+                    return;
+                }
+                if self.dialog == Some(Dialog::NewChat) {
+                    self.dialog = None;
+                }
+                self.actions.push(Action::OpenChat(created.chat));
+                if !created.unadded.is_empty() {
+                    let names: Vec<String> = created
+                        .unadded
+                        .iter()
+                        .map(|id| self.display_name(id))
+                        .collect();
+                    let said = crate::new_group::unadded_message(self.locale, &names);
+                    self.toast(said);
+                }
+            }
+            Err(failure) => {
+                if let Some(draft) = self.new_group.as_mut() {
+                    draft.creating = false;
+                }
+                if live {
+                    let said = failure.message(self.locale);
+                    self.toast_error(said);
+                }
+            }
+        }
     }
 
     pub fn toast(&mut self, message: impl Into<String>) {
@@ -15460,6 +15590,115 @@ mod tests {
         // A second click while joining sends nothing more.
         app.apply(Action::JoinGroup, &ctx);
         assert!(commands.try_recv().is_err());
+    }
+
+    /// Create sends the draft once; WhatsApp's answer opens the group and
+    /// names who could not be added, a failure keeps the dialog for another
+    /// try, and an answer nobody waits for opens nothing.
+    #[test]
+    fn a_created_group_opens_and_names_who_was_left_out() {
+        use crate::new_group::{CreateFailure, Created, Draft, Stage};
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        let ctx = egui::Context::default();
+        let ada = "15550000001@s.whatsapp.net";
+        let grace = "15550000002@s.whatsapp.net";
+        app.contacts.insert(
+            grace.into(),
+            Contact {
+                id: grace.into(),
+                full_name: Some("Grace Hopper".into()),
+                ..Default::default()
+            },
+        );
+        app.apply(Action::ShowDialog(Dialog::NewChat), &ctx);
+        app.apply(Action::StartNewGroup, &ctx);
+        app.apply(Action::ToggleNewGroupMember(ada.into()), &ctx);
+        app.apply(Action::ToggleNewGroupMember(grace.into()), &ctx);
+        app.apply(Action::CreateGroup, &ctx);
+        assert!(commands.try_recv().is_err(), "not before the name");
+        app.apply(Action::NewGroupNext, &ctx);
+        app.new_group.as_mut().unwrap().name = " Book club ".into();
+        app.apply(Action::CreateGroup, &ctx);
+        app.apply(Action::CreateGroup, &ctx);
+        let request = match commands.try_recv() {
+            Ok(Command::CreateGroup {
+                request,
+                subject,
+                members,
+                picture: None,
+            }) => {
+                assert_eq!(subject, "Book club");
+                assert_eq!(members, [ada, grace]);
+                request
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(commands.try_recv().is_err(), "sent once");
+
+        // A failure says why in plain words and leaves the name for a retry.
+        app.apply_backend_event(
+            Event::GroupCreated {
+                request,
+                result: Err(CreateFailure::RateLimited),
+            },
+            true,
+        );
+        let draft = app.new_group.as_ref().unwrap();
+        assert!(!draft.creating);
+        assert_eq!(draft.stage, Stage::Naming);
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message.contains("too many groups")),
+        );
+
+        app.apply(Action::CreateGroup, &ctx);
+        let Ok(Command::CreateGroup { request, .. }) = commands.try_recv() else {
+            panic!("retried");
+        };
+        let chat = "120363000000000001@g.us";
+        app.chats.push(Chat::new(chat.into(), "Book club".into()));
+        // An earlier request's answer is not the one the window waits for.
+        app.apply_backend_event(
+            Event::GroupCreated {
+                request: request.wrapping_sub(1),
+                result: Ok(Created {
+                    chat: chat.into(),
+                    unadded: Vec::new(),
+                }),
+            },
+            true,
+        );
+        assert!(app.new_group.is_some());
+        app.apply_backend_event(
+            Event::GroupCreated {
+                request,
+                result: Ok(Created {
+                    chat: chat.into(),
+                    unadded: vec![grace.into()],
+                }),
+            },
+            true,
+        );
+        assert_eq!(app.dialog, None);
+        assert!(app.new_group.is_none());
+        assert!(
+            app.actions
+                .iter()
+                .any(|action| matches!(action, Action::OpenChat(id) if id == chat))
+        );
+        assert!(app.toasts.iter().any(|toast| toast.message
+            == "Grace Hopper could not be added to the group. Their privacy settings may not allow it."));
+
+        // Back out of naming and choosing; letting the last one go leaves too.
+        app.apply(Action::ShowDialog(Dialog::NewChat), &ctx);
+        assert!(app.new_group.is_none(), "a new dialog starts fresh");
+        app.new_group = Some(Draft::default());
+        app.apply(Action::ToggleNewGroupMember(ada.into()), &ctx);
+        app.apply(Action::ToggleNewGroupMember(ada.into()), &ctx);
+        assert!(app.new_group.is_none());
     }
 
     #[test]

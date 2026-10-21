@@ -1362,6 +1362,44 @@ pub(super) fn self_row(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// A row that starts something, drawn like a person's: an icon on the
+/// accent colour where the photo would be. New chat's New group and Add
+/// contact.
+pub(super) fn action_row(app: &App, ui: &mut egui::Ui, icon: Icon, label: &str) -> egui::Response {
+    let palette = app.palette;
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(ui.available_width(), theme::ROW_HEIGHT),
+        Sense::click(),
+    );
+    theme::reveal_focus(&response);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    if ui.is_rect_visible(rect) {
+        if response.hovered() || response.has_focus() {
+            widgets::row_highlight(ui, &palette, rect, palette.surface_hover);
+        }
+        let circle =
+            Rect::from_center_size(pos2(rect.left() + 38.0, rect.center().y), Vec2::splat(48.0));
+        ui.painter()
+            .circle_filled(circle.center(), circle.width() / 2.0, palette.accent);
+        theme::paint_icon(ui, icon, circle, 22.0, palette.on_accent);
+        let left = rect.left() + 76.0;
+        let line = widgets::line(
+            ui,
+            label,
+            theme::medium(14.5),
+            palette.text,
+            rect.right() - 14.0 - left,
+            1,
+        );
+        line.paint(
+            ui,
+            pos2(left, rect.center().y - line.size().y / 2.0),
+            palette.text,
+        );
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 fn person_row(
     app: &mut App,
     ui: &mut egui::Ui,

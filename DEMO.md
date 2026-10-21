@@ -92,7 +92,9 @@ Locked chats preview with `channel`, `locked`, `locked-open` (the code is
 with `app-lock` (the password is `demo-password`), `app-lock-wrong`,
 `app-lock-forgot`, `app-lock-settings`, and `app-lock-setup`. `new-chat`,
 `new-contact`, `unnamed-group`, and `react-picker` show those dialogs
-(`new-contact-number` with a formatted number and no name); `group-info`,
+(`new-contact-number` with a formatted number and no name); `new-group` New
+chat's New group with two people picked and a search, `new-group-name` the
+group being named, and `new-group-creating` it on its way; `group-info`,
 `group-info-rename`, `group-info-saving`, and `group-info-locked` a group's
 editable info; `meta-ai` a Meta AI reply with code and a table.
 The editable group includes a multiline description; the locked group has none.

@@ -2188,6 +2188,25 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.app_lock.form = Some(form);
             }
             "new-chat" => app.dialog = Some(crate::model::Dialog::NewChat),
+            // New group: two people picked and a third being looked for,
+            // then the group being named.
+            "new-group" | "new-group-name" | "new-group-creating" => {
+                app.dialog = Some(crate::model::Dialog::NewChat);
+                // Opened from the chat list, with no chat behind the dialog.
+                app.open_chat = None;
+                let mut draft = crate::new_group::Draft {
+                    members: vec![SAMPLES[0].id.to_owned(), SAMPLES[3].id.to_owned()],
+                    ..Default::default()
+                };
+                if part == "new-group" {
+                    app.new_chat_search = "gr".into();
+                } else {
+                    draft.stage = crate::new_group::Stage::Naming;
+                    draft.name = "Weekend in Lisbon".into();
+                    draft.creating = part == "new-group-creating";
+                }
+                app.new_group = Some(draft);
+            }
             "unnamed-group" => {
                 app.typing.clear();
                 let mut ids = Vec::new();
@@ -5992,6 +6011,9 @@ mod tests {
             "app-lock-settings",
             "app-lock-setup",
             "new-chat",
+            "new-group",
+            "new-group-name",
+            "new-group-creating",
             "new-contact-number",
             "carousel-viewer",
             "media-album",
@@ -6872,6 +6894,218 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Presses and releases the primary button at `pos`.
+    fn press_at(app: &mut App, ctx: &egui::Context, pos: egui::Pos2) {
+        // Twice: the tooltip of the control the pointer left goes first.
+        frame_with(app, ctx, vec![egui::Event::PointerMoved(pos)]);
+        frame_with(app, ctx, Vec::new());
+        for pressed in [true, false] {
+            frame_with(
+                app,
+                ctx,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        render(app, ctx);
+    }
+
+    /// Clicks the accessible node labelled `label` with the role `role`.
+    fn press_labelled(
+        app: &mut App,
+        ctx: &egui::Context,
+        label: &str,
+        role: egui::accesskit::Role,
+    ) {
+        let nodes = accessible_nodes(app, ctx, Vec::new());
+        let pos = nodes
+            .iter()
+            .find(|(name, found, _)| name == label && *found == role)
+            .map(|(_, _, pos)| *pos)
+            .unwrap_or_else(|| panic!("no {role:?} {label:?} in {nodes:?}"));
+        press_at(app, ctx, pos);
+    }
+
+    fn new_group_dialog() -> (App, egui::Context) {
+        let mut app = app();
+        app.backend.record_demo_commands();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        app.attach(&ctx);
+        apply_flags(&mut app, Some("new-chat"));
+        // Let the dialog's opening animation finish.
+        for _ in 0..8 {
+            render(&mut app, &ctx);
+        }
+        (app, ctx)
+    }
+
+    fn press_member(app: &mut App, ctx: &egui::Context, id: &str) {
+        // Only this frame's rows: one scrolled away keeps an old rect.
+        let ids: Vec<_> = SAMPLES
+            .iter()
+            .map(|sample| crate::ui::new_group::member_row_id(sample.id))
+            .collect();
+        ctx.data_mut(|data| {
+            for row in &ids {
+                data.remove::<egui::Rect>(*row);
+            }
+        });
+        // The dialog re-centres over a few frames when its height changes.
+        for _ in 0..4 {
+            frame_with(app, ctx, Vec::new());
+        }
+        let rect = ctx
+            .data(|data| data.get_temp::<egui::Rect>(crate::ui::new_group::member_row_id(id)))
+            .unwrap_or_else(|| panic!("{id} has no row"));
+        press_at(app, ctx, rect.center());
+    }
+
+    /// New chat's New group row gives the contacts check boxes; picked people
+    /// become chips, Next asks for the name, and Create sends the group.
+    #[test]
+    fn a_group_is_chosen_named_and_created_from_new_chat() {
+        use crate::new_group::Stage;
+        use egui::accesskit::Role;
+        let (mut app, ctx) = new_group_dialog();
+        let labels = accessible_labels(&mut app, &ctx);
+        for row in ["New group", "Add contact"] {
+            assert!(labels.iter().any(|label| label == row), "{labels:?}");
+        }
+        press_labelled(&mut app, &ctx, "New group", Role::Button);
+        assert_eq!(
+            app.new_group.as_ref().map(|draft| draft.stage),
+            Some(Stage::Choosing)
+        );
+        assert_eq!(app.dialog, Some(Dialog::NewChat), "the same dialog");
+
+        press_member(&mut app, &ctx, SAMPLES[0].id);
+        press_member(&mut app, &ctx, SAMPLES[3].id);
+        assert_eq!(
+            app.new_group.as_ref().unwrap().members,
+            [SAMPLES[0].id, SAMPLES[3].id]
+        );
+        // The chip lets its person go again.
+        let chip = format!("Remove {}", SAMPLES[3].name);
+        press_labelled(&mut app, &ctx, &chip, Role::Button);
+        assert_eq!(app.new_group.as_ref().unwrap().members, [SAMPLES[0].id]);
+
+        press_labelled(&mut app, &ctx, "Next", Role::Button);
+        assert_eq!(app.new_group.as_ref().unwrap().stage, Stage::Naming);
+        render(&mut app, &ctx);
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(crate::ui::new_group::name_field_id()),
+            "the name field takes the keyboard"
+        );
+        frame_with(&mut app, &ctx, vec![egui::Event::Text("Book club".into())]);
+        assert_eq!(app.new_group.as_ref().unwrap().name, "Book club");
+        app.backend.take_demo_commands();
+        press_labelled(&mut app, &ctx, "Create", Role::Button);
+        let sent: Vec<_> = app
+            .backend
+            .take_demo_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                crate::backend::Command::CreateGroup {
+                    subject, members, ..
+                } => Some((subject, members)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            [("Book club".to_owned(), vec![SAMPLES[0].id.to_owned()])]
+        );
+        assert!(app.new_group.as_ref().unwrap().creating);
+    }
+
+    /// Back steps out one stage at a time, unchecking everyone leaves the
+    /// choice, and Escape closes the dialog as before.
+    #[test]
+    fn back_unchecking_and_escape_leave_the_new_group() {
+        use crate::new_group::Stage;
+        use egui::accesskit::Role;
+        let (mut app, ctx) = new_group_dialog();
+        press_labelled(&mut app, &ctx, "New group", Role::Button);
+        press_member(&mut app, &ctx, SAMPLES[0].id);
+        press_member(&mut app, &ctx, SAMPLES[0].id);
+        assert!(app.new_group.is_none(), "nobody picked: the plain list");
+        assert_eq!(app.dialog, Some(Dialog::NewChat));
+
+        press_labelled(&mut app, &ctx, "New group", Role::Button);
+        press_member(&mut app, &ctx, SAMPLES[0].id);
+        press_labelled(&mut app, &ctx, "Next", Role::Button);
+        // The pill, not the header's arrow: both say Back.
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        let back = nodes
+            .iter()
+            .filter(|(label, role, _)| label == "Back" && *role == Role::Button)
+            .map(|(_, _, pos)| *pos)
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .unwrap();
+        press_at(&mut app, &ctx, back);
+        assert_eq!(app.new_group.as_ref().unwrap().stage, Stage::Choosing);
+        assert_eq!(app.new_group.as_ref().unwrap().members, [SAMPLES[0].id]);
+        // The header's arrow, beside the heading.
+        let nodes = accessible_nodes(&mut app, &ctx, Vec::new());
+        let heading = nodes
+            .iter()
+            .find(|(label, _, _)| label == "Add group members")
+            .map(|(_, _, pos)| *pos)
+            .unwrap();
+        let arrow = nodes
+            .iter()
+            .filter(|(label, role, _)| label == "Back" && *role == Role::Button)
+            .map(|(_, _, pos)| *pos)
+            .min_by(|a, b| a.distance(heading).total_cmp(&b.distance(heading)))
+            .unwrap();
+        press_at(&mut app, &ctx, arrow);
+        assert!(app.new_group.is_none());
+
+        press_labelled(&mut app, &ctx, "New group", Role::Button);
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        render(&mut app, &ctx);
+        assert_eq!(app.dialog, None);
+        assert!(app.new_group.is_none());
+    }
+
+    /// The choosing step's search narrows the list, and checking someone
+    /// clears it for the next name.
+    #[test]
+    fn checking_someone_clears_the_search_for_the_next_name() {
+        let (mut app, ctx) = new_group_dialog();
+        press_labelled(&mut app, &ctx, "New group", egui::accesskit::Role::Button);
+        frame_with(&mut app, &ctx, vec![egui::Event::Text("katherine".into())]);
+        render(&mut app, &ctx);
+        assert_eq!(app.new_chat_search, "katherine");
+        let listed = |ctx: &egui::Context, id: &str| {
+            ctx.data(|data| data.get_temp::<egui::Rect>(crate::ui::new_group::member_row_id(id)))
+        };
+        ctx.data_mut(|data| {
+            data.remove::<egui::Rect>(crate::ui::new_group::member_row_id(SAMPLES[0].id))
+        });
+        render(&mut app, &ctx);
+        assert!(listed(&ctx, SAMPLES[0].id).is_none(), "Ada is not a match");
+        press_member(&mut app, &ctx, SAMPLES[3].id);
+        assert!(app.new_chat_search.is_empty());
+        assert_eq!(app.new_group.as_ref().unwrap().members, [SAMPLES[3].id]);
     }
 
     /// Lets an eased key scroll's animation settle: tests advance time by the
@@ -16255,7 +16489,14 @@ mod tests {
 
     #[test]
     fn dialogs_keep_local_navigation_and_single_focus_borders() {
-        for page in ["locked-setup", "poll-create", "new-chat", "location"] {
+        for page in [
+            "locked-setup",
+            "poll-create",
+            "new-chat",
+            "new-group",
+            "new-group-name",
+            "location",
+        ] {
             let mut app = app();
             apply_flags(&mut app, Some(page));
             let ctx = egui::Context::default();

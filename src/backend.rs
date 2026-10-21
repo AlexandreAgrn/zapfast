@@ -574,6 +574,24 @@ pub enum Command {
         chat: ChatId,
         jpeg: Option<Vec<u8>>,
     },
+    /// Asks for a picture for a group being created, and answers with
+    /// `Event::NewGroupPicture`: cropped and encoded as a group photo is.
+    PickNewGroupPicture,
+    /// Creates a group with us as its admin, answered by `Event::GroupCreated`.
+    /// `members` are canonical chat ids; `picture` a staged JPEG from
+    /// `PickNewGroupPicture`, set once the group exists.
+    CreateGroup {
+        request: u64,
+        subject: String,
+        members: Vec<ChatId>,
+        picture: Option<std::path::PathBuf>,
+    },
+    /// Internal: WhatsApp answered `CreateGroup`.
+    GroupCreated {
+        request: u64,
+        result: Result<CreatedGroup, crate::new_group::CreateFailure>,
+        picture: Option<std::path::PathBuf>,
+    },
     /// Internal: WhatsApp answered a change to a group's name or photo.
     GroupEdited {
         chat: ChatId,
@@ -1245,6 +1263,13 @@ pub enum Event {
         code: String,
         result: Result<(ChatId, bool), String>,
     },
+    /// A picture picked for a group being created, staged as a JPEG.
+    NewGroupPicture(Result<std::path::PathBuf, String>),
+    /// `Command::CreateGroup` finished: the group is filed and can open.
+    GroupCreated {
+        request: u64,
+        result: Result<crate::new_group::Created, crate::new_group::CreateFailure>,
+    },
     /// Number lookup failed without opening a chat.
     ContactFailed {
         request: u64,
@@ -1316,6 +1341,26 @@ pub enum GroupEdit {
     Name(String),
     /// A new photo, or none.
     Picture { removed: bool },
+}
+
+/// A group WhatsApp created for `Command::CreateGroup`, read on the runtime
+/// and filed by the worker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedGroup {
+    /// The group's canonical chat id.
+    pub chat: ChatId,
+    pub subject: String,
+    /// The members under canonical chat ids, ourselves included.
+    pub participants: Vec<String>,
+    /// Whether we are an admin, as the creator is.
+    pub admin: bool,
+    pub info_locked: bool,
+    pub read_only: bool,
+    /// When WhatsApp made it, in Unix seconds.
+    pub created_at: i64,
+    /// The people picked whom WhatsApp did not add. Empty when the members
+    /// could not be confirmed.
+    pub unadded: Vec<ChatId>,
 }
 
 /// Where a channel's picture lives on WhatsApp's media servers, as the

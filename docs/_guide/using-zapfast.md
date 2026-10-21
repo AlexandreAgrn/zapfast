@@ -556,6 +556,18 @@ anything else, such as an extension, is refused rather than dropped. ZapFast
 asks WhatsApp whether the number is registered before it opens the chat, and
 a failed check can be retried. Add a name instead to save the contact.
 
+To make a group, open **New chat** and choose **New group**. Each contact gets a
+check box: search for a name, check the person, and search for the next; the
+people you pick appear above the list, and clicking one there takes them off
+again. Choose **Next**, type the group's name (WhatsApp allows up to 100
+characters), optionally choose **Add group photo** (cropped to a centred
+square, as the group details' photo is), and choose **Create**. You are the
+group's admin, and the new group opens straight away. Some people's privacy
+settings only let certain contacts add them to groups: when WhatsApp does not
+add someone, ZapFast names them after the group is created, and you can invite
+them from your phone. **Back** steps back, unchecking everyone returns to the
+contact list, and Escape closes the dialog.
+
 The search bar finds chats by name, number, or latest message; searches all
 messages stored on this computer; and finds contacts without an existing chat.
 Use `↑`/`↓` to select a matching chat and Enter to open it ready for typing.

@@ -2861,6 +2861,19 @@ pub enum Action {
     MuteAllChannels(bool),
     /// Joins the group of the invite being previewed.
     JoinGroup,
+    /// Gives the New chat dialog's contacts check boxes, to make a group.
+    StartNewGroup,
+    /// Picks someone for the new group, or lets them go.
+    ToggleNewGroupMember(ChatId),
+    /// From choosing the new group's members to naming it.
+    NewGroupNext,
+    /// One step back: from naming to choosing, from choosing to the list.
+    NewGroupBack,
+    /// Asks for a photo for the new group.
+    PickNewGroupPicture,
+    RemoveNewGroupPicture,
+    /// Creates the group the New chat dialog put together.
+    CreateGroup,
     /// A chat opened from the main list, kept there under the Unread filter.
     KeepUnread(ChatId),
     /// Focuses the chat-list search and leaves the open chat alone.

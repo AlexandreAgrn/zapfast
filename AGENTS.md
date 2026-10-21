@@ -389,6 +389,15 @@ protocol. These notes are for coding agents and new contributors.
   dialog. A rename lands only after WhatsApp accepts it, and bumps
   `subject_generation` so a metadata answer asked for earlier cannot restore
   the old subject. A refusal re-asks the metadata to relearn the rights.
+- New chat's **New group** turns the same dialog into steps
+  (`new_group::Draft` on the `Account`: choosing with check boxes and chips,
+  then naming with an optional photo picked and cropped as the group dialog's
+  is). `Command::CreateGroup` calls `groups().create_group` with us as the
+  creator; the library reads a refused `<participant error="403">` in its
+  answer as a member, so the task fetches the metadata once more and the
+  people picked but missing are reported by name. `group_created` files the
+  chat named, with its members and our admin rights, before
+  `Event::GroupCreated` opens it.
 - Mentioning everyone uses the visible body token `@all` and bit 1 of
   `ContextInfo.non_jid_mentions` (`src/mentions.rs`). Localized words
   (`@todos` in Portuguese, and the one-word alias of each other language)
