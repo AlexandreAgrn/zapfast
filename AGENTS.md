@@ -236,9 +236,9 @@ protocol. These notes are for coding agents and new contributors.
   cameras through linuxvideo on Linux (pure Rust, no build-time bindings) and
   nokhwa on macOS and Windows, converts every layout to YUV 4:2:0, and the
   call's capture thread encodes it with openh264 (Constrained Baseline, 720p
-  at most, 20 fps) into the library's timed `VideoSource`. `src/video_rate.rs`
+  at most, 25 fps) into the library's timed `VideoSource`. `src/video_rate.rs`
   adapts the bitrate (from 700 kbit/s) and the step of size and frame rate
-  (480p15, 540p20, 720p20) to the peer's RTCP loss, its REMB, dropped video,
+  (480p, 540p and 720p, all at 25 fps, preferring motion to size) to the peer's RTCP loss, its REMB, dropped video,
   and queue delay (the round trip from its reports' LSR/DLSR above the call's
   shortest, since a deep buffer holds seconds before it loses), and climbs
   quickly back only to just under where loss was last reported, slowly past it;

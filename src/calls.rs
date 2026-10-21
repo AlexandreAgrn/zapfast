@@ -4304,8 +4304,8 @@ mod tests {
             plans.iter().map(|plan| plan.size).collect::<Vec<_>>(),
             [(852, 480), (960, 540), (1280, 720)]
         );
-        assert!(plans.iter().all(|plan| plan.every == 3), "{plans:?}");
-        assert!((plans[2].sent_fps() - 50.0 / 3.0).abs() < 1e-9);
+        assert!(plans.iter().all(|plan| plan.every == 2), "{plans:?}");
+        assert!((plans[2].sent_fps() - 25.0).abs() < 1e-9);
         assert_eq!(plans[2].frame_len(), 1280 * 720 * 3 / 2);
         // A portrait camera keeps its shape at every step.
         let upright = SendPlan::new(
@@ -4317,7 +4317,10 @@ mod tests {
             },
         );
         assert_eq!(upright.size, (480, 852));
-        assert_eq!(upright.every, 2, "15 frames a second from a 30 fps camera");
+        assert_eq!(
+            upright.every, 1,
+            "every frame of a 30 fps camera, the nearest to 25"
+        );
     }
 
     #[test]
