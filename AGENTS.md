@@ -175,8 +175,11 @@ protocol. These notes are for coding agents and new contributors.
   packing the engine's frames. The reference is taken as played, not as the
   engine queued it, so the queue's depth never shifts the alignment; the
   devices' reported latencies are only AEC3's starting hint, and it finds the
-  delay itself. One `FarEnd` per call links the two sides across device
-  changes. AGC2 applies digital gain only, from 0 up to 20 dB (normalize's
+  delay itself (within about 600 ms), so the microphone's reader never waits
+  for the engine: `call_audio::offer` lets the oldest queued frame go instead,
+  or a call answered before its media is up leaves the microphone a second
+  behind and the canceller cancels nothing. One `FarEnd` per call links the
+  two sides across device changes. AGC2 applies digital gain only, from 0 up to 20 dB (normalize's
   cap), never the system's microphone volume. Headphones need no setting:
   AEC3's transparent mode stops suppressing when it hears no echo. `backend/worker/calls.rs` owns at most one
   call per account; the window (`app/calls.rs`) holds one call across all

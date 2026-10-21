@@ -205,6 +205,39 @@ pub(crate) struct Canceller {
     scratch: [f32; CHUNK],
     /// The microphone's clock, for its latency.
     input: Option<fastframe_audio::Clock>,
+    /// The reference's and the microphone's energy since the last report, for the log's levels.
+    reference: Level,
+    capture: Level,
+}
+
+/// A signal's mean square over a stretch, as a level in dBFS.
+#[derive(Clone, Copy, Debug, Default)]
+struct Level {
+    energy: f64,
+    samples: u64,
+}
+
+impl Level {
+    fn add(&mut self, samples: &[f32]) {
+        self.energy += samples
+            .iter()
+            .map(|sample| f64::from(*sample) * f64::from(*sample))
+            .sum::<f64>();
+        self.samples += samples.len() as u64;
+    }
+
+    /// The level so far, and a fresh start; full-scale square waves are 0 dBFS.
+    fn take(&mut self) -> String {
+        let level = std::mem::take(self);
+        if level.samples == 0 {
+            return "none".to_owned();
+        }
+        let mean = level.energy / level.samples as f64;
+        if mean <= 0.0 {
+            return "silent".to_owned();
+        }
+        format!("{:.1} dBFS", 10.0 * mean.log10())
+    }
 }
 
 impl Canceller {
@@ -228,6 +261,8 @@ impl Canceller {
             filled: 0,
             scratch: [0.0; CHUNK],
             input,
+            reference: Level::default(),
+            capture: Level::default(),
         }
     }
 
@@ -236,6 +271,7 @@ impl Canceller {
         let delay_ms = self.listen();
         // Only a hint, for where the canceller starts looking: it finds the delay itself.
         let _ = self.processing.set_stream_delay_ms(delay_ms);
+        self.capture.add(chunk);
         if self
             .processing
             .process_capture_f32(&[&chunk[..]], &mut [&mut self.scratch[..]])
@@ -289,6 +325,7 @@ impl Canceller {
             render,
             filled,
             scratch,
+            reference,
             ..
         } = self;
         for &sample in first.iter().chain(second) {
@@ -297,6 +334,7 @@ impl Canceller {
                 *filled += 1;
                 if *filled == CHUNK {
                     *filled = 0;
+                    reference.add(&render[..]);
                     let _ = processing.process_render_f32(&[&render[..]], &mut [&mut scratch[..]]);
                 }
             });
@@ -305,24 +343,27 @@ impl Canceller {
         delay
     }
 
-    /// How much of the echo the canceller takes out and the delay it found, for the log: numbers
-    /// about the signal, never the signal.
-    pub(crate) fn report(&self) -> String {
+    /// How much of the echo the canceller takes out, the delay it found, which speaker stream
+    /// the reference comes from, and the reference's and the microphone's levels since the last
+    /// report, for the log: numbers about the signal, never the signal.
+    pub(crate) fn report(&mut self) -> String {
         let stats = self.processing.statistics();
         let decibels =
             |value: Option<f64>| value.map_or("unknown".to_owned(), |v| format!("{v:.1} dB"));
         format!(
-            "echo reduced {}, echo return loss {}, delay {}, speaker {}",
+            "echo reduced {}, echo return loss {}, delay {}, speaker stream {}, reference {}, microphone {}",
             decibels(stats.echo_return_loss_enhancement),
             decibels(stats.echo_return_loss),
             stats
                 .delay_ms
                 .map_or("unknown".to_owned(), |delay| format!("{delay} ms")),
             if self.generation == 0 {
-                "not heard yet"
+                "none yet".to_owned()
             } else {
-                "heard"
+                self.generation.to_string()
             },
+            self.reference.take(),
+            self.capture.take(),
         )
     }
 }
@@ -474,6 +515,87 @@ mod tests {
         let erle = erle_at(44_100, Stages::EchoOnly, 60);
         println!("echo only, 44.1 kHz speaker: ERLE {erle:.1} dB");
         assert!(erle > 20.0, "the echo is reduced by {erle:.1} dB");
+    }
+
+    /// What the call's first real test met: the microphone reached the canceller a second after
+    /// the reference did, past the longest echo path it searches, and it took out nothing at all
+    /// (the log said "echo reduced 0.2 dB, delay 0 ms"). The reader no longer falls behind
+    /// (`call_audio::offer`); this keeps the reason on record.
+    #[test]
+    fn a_microphone_heard_a_second_late_cannot_be_cancelled() {
+        let far = speech(12.0, 7, 120.0);
+        let mic = room(&far, RATE as usize + 960);
+        let out = run(&far, &mic, Stages::EchoOnly);
+        let tail = out.len() - 4 * RATE as usize;
+        let erle = db(energy(&mic[tail..]) / energy(&out[tail..]));
+        println!("microphone a second late: ERLE {erle:.1} dB");
+        assert!(
+            erle < 6.0,
+            "a second late, the echo still came down {erle:.1} dB"
+        );
+    }
+
+    /// The coordinator's first guess at that call: two speaker streams opened in quick succession
+    /// as the call starts. The canceller must follow the second and cancel what it plays.
+    #[test]
+    fn two_speaker_streams_at_the_start_of_a_call_are_followed() {
+        let far_end = FarEnd::new();
+        let mut first = far_end.tap();
+        first.configure(48_000, 2);
+        let mut canceller = Canceller::new(far_end.clone(), None, Stages::EchoOnly);
+        let mut chunk = [0.0_f32; CHUNK];
+        // A tenth of a second of the first stream's silence, then the second replaces it.
+        for _ in 0..10 {
+            first.rendered(&[0.0; 960]);
+            canceller.process(&mut chunk);
+        }
+        let mut second = far_end.tap();
+        second.configure(48_000, 2);
+        drop(first);
+        let far = speech(12.0, 7, 120.0);
+        let mic = room(&far, 960);
+        let speaker = super::super::Layout {
+            rate: 48_000,
+            channels: 2,
+        };
+        let mut out = Vec::with_capacity(mic.len());
+        for (far, mic) in far
+            .as_chunks::<CHUNK>()
+            .0
+            .iter()
+            .zip(mic.as_chunks::<CHUNK>().0)
+        {
+            let frame: Vec<i16> = far
+                .iter()
+                .map(|s| (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16)
+                .collect();
+            second.rendered(&speaker.convert(&frame));
+            chunk = *mic;
+            canceller.process(&mut chunk);
+            out.extend_from_slice(&chunk);
+        }
+        let report = canceller.report();
+        println!("{report}");
+        assert!(
+            report.contains("reference -"),
+            "the reference has a level: {report}"
+        );
+        let tail = out.len() - 4 * RATE as usize;
+        let erle = db(energy(&mic[tail..]) / energy(&out[tail..]));
+        println!("second speaker stream: ERLE {erle:.1} dB");
+        assert!(erle > 20.0, "the echo is reduced by {erle:.1} dB");
+    }
+
+    #[test]
+    fn the_report_gives_levels_and_starts_afresh() {
+        let mut canceller = Canceller::new(FarEnd::new(), None, Stages::EchoOnly);
+        let mut chunk = [0.5_f32; CHUNK];
+        canceller.process(&mut chunk);
+        let report = canceller.report();
+        assert!(report.contains("speaker stream none yet"), "{report}");
+        assert!(report.contains("reference none"), "{report}");
+        assert!(report.contains("microphone -6.0 dBFS"), "{report}");
+        assert!(canceller.report().contains("microphone none"));
     }
 
     /// The near end alone, after the canceller has learned the room: our own voice must go out as

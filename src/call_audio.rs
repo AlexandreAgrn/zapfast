@@ -84,8 +84,7 @@ const RELINK_GRACE: Duration = Duration::from_millis(3_000);
 const UNPLAYED_RESTARTS_BEFORE_DEFAULT: usize = 3;
 /// How long a pump waits before reopening a device that would not open.
 const RETRY: Duration = Duration::from_millis(500);
-/// How long a reader waits for room in the engine's channel before looking at its stop flag again,
-/// and for the microphone's next sample.
+/// How long a reader waits for the microphone's next sample.
 const BACKOFF: Duration = Duration::from_millis(5);
 /// How long a microphone may deliver nothing before it is taken for gone and reopened.
 const MIC_SILENT: Duration = Duration::from_secs(1);
@@ -707,13 +706,22 @@ impl MicReader {
         let (ready, opened) = std::sync::mpsc::channel::<Result<(), String>>();
         let name = device.map(str::to_owned);
         let far_end = far_end.clone();
+        let drain = rx.clone();
         let thread = {
             let stop = Arc::clone(&stop);
             let delivered = Arc::clone(&delivered);
             std::thread::Builder::new()
                 .name("call-microphone".to_owned())
                 .spawn(move || {
-                    read_microphone(name.as_deref(), &tx, &stop, &delivered, &ready, far_end)
+                    read_microphone(
+                        name.as_deref(),
+                        &tx,
+                        &drain,
+                        &stop,
+                        &delivered,
+                        &ready,
+                        far_end,
+                    )
                 })
                 .map_err(|error| format!("the microphone thread could not start: {error}"))?
         };
@@ -747,6 +755,7 @@ impl Drop for MicReader {
 fn read_microphone(
     device: Option<&str>,
     tx: &async_channel::Sender<Vec<i16>>,
+    drain: &async_channel::Receiver<Vec<i16>>,
     stop: &AtomicBool,
     delivered: &AtomicBool,
     ready: &std::sync::mpsc::Sender<Result<(), String>>,
@@ -768,10 +777,12 @@ fn read_microphone(
     let mut block = vec![0.0_f32; converter.block()];
     let mut frames = Vec::new();
     let mut reported = Instant::now();
+    let mut replaced = 0_usize;
+    let mut replaced_logged = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         if reported.elapsed() >= ECHO_REPORT {
             reported = Instant::now();
-            if let Some(canceller) = &converter.canceller {
+            if let Some(canceller) = &mut converter.canceller {
                 log::info!("[CALL] echo canceller: {}", canceller.report());
             }
         }
@@ -793,22 +804,56 @@ fn read_microphone(
         frames.clear();
         converter.push(&block, &mut frames);
         for frame in frames.drain(..) {
-            let mut pending = frame;
-            loop {
-                match tx.try_send(pending) {
-                    Ok(()) => {
-                        delivered.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                    Err(async_channel::TrySendError::Full(frame)) => {
-                        if stop.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        pending = frame;
-                        std::thread::sleep(BACKOFF);
-                    }
-                    Err(async_channel::TrySendError::Closed(_)) => return,
+            match offer(tx, drain, frame) {
+                Offered::Sent => delivered.store(true, Ordering::Relaxed),
+                Offered::Replaced => {
+                    delivered.store(true, Ordering::Relaxed);
+                    replaced += 1;
                 }
+                Offered::Closed => return,
+            }
+        }
+        if replaced > 0 && replaced_logged.elapsed() >= ECHO_REPORT {
+            replaced_logged = Instant::now();
+            log::debug!("[CALL] the engine was not reading: {replaced} microphone frames let go");
+            replaced = 0;
+        }
+    }
+}
+
+/// What became of a frame [`offer`] handed on.
+#[derive(Debug, PartialEq, Eq)]
+enum Offered {
+    Sent,
+    /// The queue was full, so the oldest frame in it was let go to make room.
+    Replaced,
+    /// Nobody reads the queue any more.
+    Closed,
+}
+
+/// Hands a microphone frame on without ever waiting for room.
+///
+/// The reader must keep reading the device in real time. When it waited for a queue the engine was
+/// not reading yet (a call being answered, before its media is up), the device's ring filled
+/// behind it and stayed full: every sample after that reached the echo canceller, and the peer,
+/// as late as the wait had been. A second late is past the longest echo path the canceller
+/// searches, so it never found the echo, and the peer heard us a second late too. So the queue
+/// keeps the newest frames instead, and the oldest is let go: `drain` is a receiver of the same
+/// queue, used for nothing else.
+fn offer(
+    tx: &async_channel::Sender<Vec<i16>>,
+    drain: &async_channel::Receiver<Vec<i16>>,
+    frame: Vec<i16>,
+) -> Offered {
+    match tx.try_send(frame) {
+        Ok(()) => Offered::Sent,
+        Err(async_channel::TrySendError::Closed(_)) => Offered::Closed,
+        Err(async_channel::TrySendError::Full(frame)) => {
+            let _ = drain.try_recv();
+            match tx.try_send(frame) {
+                Err(async_channel::TrySendError::Closed(_)) => Offered::Closed,
+                // Another reader took the room first; this frame is the one let go.
+                Ok(()) | Err(async_channel::TrySendError::Full(_)) => Offered::Replaced,
             }
         }
     }
@@ -1274,12 +1319,19 @@ pub(crate) mod fake {
         at: usize,
         /// Set to make the device behave as one that has been taken away.
         gone: bool,
+        /// When it opened: it delivers in real time from then, as a device does, with a tenth of a
+        /// second at once to start.
+        opened: Instant,
     }
 
     impl Microphone {
         pub(super) fn next(&mut self) -> Option<f32> {
             if self.gone || self.samples.is_empty() {
                 return None;
+            }
+            let per_second = f64::from(self.rate) * f64::from(self.channels.max(1));
+            while self.at as f64 >= (self.opened.elapsed().as_secs_f64() + 0.1) * per_second {
+                std::thread::sleep(Duration::from_millis(1));
             }
             let sample = self.samples[self.at % self.samples.len()];
             self.at = self.at.wrapping_add(1);
@@ -1464,6 +1516,7 @@ pub(crate) mod fake {
             rate: spec.rate,
             at: 0,
             gone: spec.gone,
+            opened: Instant::now(),
         })
     }
 
@@ -1720,6 +1773,50 @@ mod tests {
         assert!(
             got.iter().flatten().any(|sample| *sample != 0),
             "the frames carry what the microphone delivered"
+        );
+    }
+
+    /// An engine that does not read yet, as while a call is being answered, must not leave the
+    /// microphone a second behind for the rest of the call: the echo canceller then hears our
+    /// microphone later than the longest echo path it searches, and never finds the echo.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_late_engine_does_not_leave_the_microphone_behind() {
+        let samples: Vec<f32> = (0..960).map(|sample| sample as f32 / 1_920.0).collect();
+        let (_devices, _speaker) = fake::install(samples, 1, 48_000, (48_000, 2));
+        let (input, frames) = AudioInput::spawn(None, &FarEnd::new());
+        // Answered a second and a half after the microphone opened.
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let mut got = 0_usize;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(300) {
+            if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(20), frames.recv()).await
+            {
+                got += 1;
+            }
+        }
+        drop(input);
+        // What the two queues hold (four frames each) and 300 ms of real time; a reader that had
+        // waited for room would hand over the second and a half it fell behind, 25 frames more.
+        assert!(got >= 5, "the engine got {got} frames");
+        assert!(
+            got <= 4 + 4 + 5 + 2,
+            "the engine got {got} frames in 300 ms: the microphone fell behind while it waited"
+        );
+    }
+
+    #[test]
+    fn a_full_queue_lets_its_oldest_frame_go_rather_than_wait() {
+        let (tx, rx) = async_channel::bounded::<Vec<i16>>(2);
+        let drain = rx.clone();
+        assert_eq!(offer(&tx, &drain, vec![1]), Offered::Sent);
+        assert_eq!(offer(&tx, &drain, vec![2]), Offered::Sent);
+        assert_eq!(offer(&tx, &drain, vec![3]), Offered::Replaced);
+        assert_eq!(rx.try_recv(), Ok(vec![2]), "the newest frames are kept");
+        assert_eq!(rx.try_recv(), Ok(vec![3]));
+        drop((rx, drain));
+        assert_eq!(
+            offer(&tx, &async_channel::bounded(1).1, vec![4]),
+            Offered::Closed
         );
     }
 
