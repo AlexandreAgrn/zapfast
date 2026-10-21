@@ -753,6 +753,17 @@ pub fn ink_middle(galley: &egui::Galley) -> Option<f32> {
         .then(|| row.pos.y + (top + bottom) / 2.0)
 }
 
+/// Where a capital's ink centres in `galley`'s first row, from its top:
+/// halfway between the top and the bottom of its first glyph, laid out from
+/// "H", which stands on the baseline. `None` when the glyph has no ink.
+pub fn cap_middle(galley: &egui::Galley) -> Option<f32> {
+    let row = galley.rows.first()?;
+    let capital = row.glyphs.first()?;
+    let top = capital.pos.y + capital.uv_rect.offset.y;
+    let bottom = top + capital.uv_rect.size.y;
+    (!capital.uv_rect.is_nothing()).then(|| row.pos.y + (top + bottom) / 2.0)
+}
+
 /// Where a search field's text was laid out last frame, for layout tests.
 pub fn search_galley_id(field: egui::Id) -> egui::Id {
     field.with("galley")
@@ -784,15 +795,15 @@ pub fn search_field(
         .image(palette.secondary, 16.0)
         .paint_at(ui, icon_rect);
     let format = egui::TextFormat::simple(theme::regular(14.0), palette.text);
-    // The ink, not the line box, centres on the icons: the span from a
-    // capital's top to a descender's bottom sits as far from the field's top
-    // as from its bottom, as in the composer. Centring the line box left the
-    // platform font's lowercase a point or two below the magnifier and the
-    // clear button, since its box has more room above the capitals than
-    // below the descenders.
-    let probe = bidi::layout_field(ui, "Hy", &format, f32::INFINITY);
+    // A capital, from its top to the baseline, centres on the icons, which
+    // is where a word reads as centred. Centring the line box left the
+    // platform font's text a point or two below the magnifier, since its box
+    // has more room above the capitals than below the descenders; centring
+    // capitals and descenders together lifted a word without descenders, the
+    // usual case, above it.
+    let probe = bidi::layout_field(ui, "H", &format, f32::INFINITY);
     let line_height = probe.size().y;
-    let middle = ink_middle(&probe).unwrap_or(line_height / 2.0);
+    let middle = cap_middle(&probe).unwrap_or(line_height / 2.0);
     let top = fastframe_text::snap_to_pixels(rect.center().y - middle, ui.ctx().pixels_per_point());
     let field_rect = Rect::from_min_max(
         pos2(rect.left() + 34.0, top),

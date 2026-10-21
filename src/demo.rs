@@ -15219,14 +15219,15 @@ mod tests {
         found
     }
 
-    /// The chat list's search field centres its text's ink, from a capital's
-    /// top to a descender's bottom, on the field and its icons at every
-    /// scale, as the composer does; the hint sits on the same line, and the
-    /// clear button's cross on the same centre. Centring the line box left
-    /// lowercase text below the magnifier and the cross lower still.
+    /// The chat list's search field centres a capital's ink, from its top to
+    /// the baseline, on the field and its icons at every scale; the hint sits
+    /// on the same line, and the clear button's cross on the same centre.
+    /// Centring the line box left text below the magnifier and the cross
+    /// lower still, and centring descenders too lifted most words above it.
     #[test]
     fn the_search_fields_text_centres_on_its_icons_at_every_scale() {
-        const DRAFT: &str = "Hy";
+        // A capital's ink, from its top to the baseline, centres on the field.
+        const DRAFT: &str = "H";
         let field = egui::Id::new("chat-search");
         for scale in [1.0_f32, 1.25, 1.333_333, 1.5, 2.0] {
             let mut ink_at = None;
