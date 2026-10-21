@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use rodio::buffer::SamplesBuffer;
 
+pub mod dump;
 pub mod echo;
 
 pub use echo::FarEnd;

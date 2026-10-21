@@ -179,7 +179,15 @@ protocol. These notes are for coding agents and new contributors.
   for the engine: `call_audio::offer` lets the oldest queued frame go instead,
   or a call answered before its media is up leaves the microphone a second
   behind and the canceller cancels nothing. One `FarEnd` per call links the
-  two sides across device changes. AGC2 applies digital gain only, from 0 up to 20 dB (normalize's
+  two sides across device changes.
+  `ZAPFAST_CALL_AUDIO_DUMP=<folder>` (`call_audio/dump.rs`, never by
+  default) writes each microphone stream's reference, raw microphone and
+  output as 16 kHz float WAV in the canceller's 10 ms chunks, plus the order
+  they were fed in; `examples/aec_replay.rs` replays one exactly (a test
+  checks it is sample for sample) with other settings, AEC3's full
+  configuration included, and measures the true echo delay by
+  cross-correlation. sonora's pipeline does not take an AEC3 configuration,
+  so a tuning found there needs sonora to expose one. AGC2 applies digital gain only, from 0 up to 20 dB (normalize's
   cap), never the system's microphone volume. Headphones need no setting:
   AEC3's transparent mode stops suppressing when it hears no echo. `backend/worker/calls.rs` owns at most one
   call per account; the window (`app/calls.rs`) holds one call across all

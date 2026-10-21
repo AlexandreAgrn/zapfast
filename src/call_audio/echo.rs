@@ -166,6 +166,11 @@ pub(crate) enum Stages {
     EchoOnly,
 }
 
+/// The processing a call runs, all stages on: `examples/aec_replay.rs` replays a dump through it.
+pub fn call_config() -> Config {
+    config(Stages::All)
+}
+
 fn config(stages: Stages) -> Config {
     let all = stages == Stages::All;
     Config {
@@ -208,6 +213,10 @@ pub(crate) struct Canceller {
     /// The reference's and the microphone's energy since the last report, for the log's levels.
     reference: Level,
     capture: Level,
+    /// Where the canceller's input and output are saved, when `ZAPFAST_CALL_AUDIO_DUMP` asks.
+    dump: Option<super::dump::AudioDump>,
+    /// Reference chunks fed since the last microphone chunk, for the dump's order.
+    fed: u32,
 }
 
 /// A signal's mean square over a stretch, as a level in dBFS.
@@ -263,6 +272,12 @@ impl Canceller {
             input,
             reference: Level::default(),
             capture: Level::default(),
+            dump: match stages {
+                Stages::All => super::dump::AudioDump::from_environment(),
+                #[cfg(test)]
+                Stages::EchoOnly => None,
+            },
+            fed: 0,
         }
     }
 
@@ -272,12 +287,19 @@ impl Canceller {
         // Only a hint, for where the canceller starts looking: it finds the delay itself.
         let _ = self.processing.set_stream_delay_ms(delay_ms);
         self.capture.add(chunk);
+        if let Some(dump) = &mut self.dump {
+            dump.microphone(chunk, self.fed, delay_ms);
+        }
+        self.fed = 0;
         if self
             .processing
             .process_capture_f32(&[&chunk[..]], &mut [&mut self.scratch[..]])
             .is_ok()
         {
             chunk.copy_from_slice(&self.scratch);
+        }
+        if let Some(dump) = &mut self.dump {
+            dump.output(chunk);
         }
     }
 
@@ -326,6 +348,8 @@ impl Canceller {
             filled,
             scratch,
             reference,
+            dump,
+            fed,
             ..
         } = self;
         for &sample in first.iter().chain(second) {
@@ -335,6 +359,10 @@ impl Canceller {
                 if *filled == CHUNK {
                     *filled = 0;
                     reference.add(&render[..]);
+                    *fed += 1;
+                    if let Some(dump) = dump.as_mut() {
+                        dump.reference(&render[..]);
+                    }
                     let _ = processing.process_render_f32(&[&render[..]], &mut [&mut scratch[..]]);
                 }
             });
@@ -584,6 +612,97 @@ mod tests {
         let erle = db(energy(&mic[tail..]) / energy(&out[tail..]));
         println!("second speaker stream: ERLE {erle:.1} dB");
         assert!(erle > 20.0, "the echo is reduced by {erle:.1} dB");
+    }
+
+    /// A dump replays exactly: the reference fed in the recorded order, with the recorded hints,
+    /// through the call's processing, gives back the output the call sent, sample for sample.
+    #[test]
+    fn a_dump_replays_to_exactly_what_the_call_sent() {
+        let folder = tempfile::tempdir().expect("a folder");
+        let far = speech(6.0, 7, 120.0);
+        let mic = room(&far, 960);
+        let far_end = FarEnd::new();
+        let mut tap = far_end.tap();
+        tap.configure(44_100, 2);
+        let speaker = super::super::Layout {
+            rate: 44_100,
+            channels: 2,
+        };
+        let mut canceller = Canceller::new(far_end.clone(), None, Stages::All);
+        canceller.dump =
+            Some(super::super::dump::AudioDump::create(folder.path()).expect("a dump"));
+        for (index, (far, mic)) in far
+            .as_chunks::<CHUNK>()
+            .0
+            .iter()
+            .zip(mic.as_chunks::<CHUNK>().0)
+            .enumerate()
+        {
+            // The speaker's blocks arrive unevenly, as a device's callbacks do.
+            if index % 3 != 1 {
+                let frame: Vec<i16> = far
+                    .iter()
+                    .map(|s| (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16)
+                    .collect();
+                tap.rendered(&speaker.convert(&frame));
+            }
+            let mut chunk = *mic;
+            canceller.process(&mut chunk);
+        }
+        drop(canceller);
+        let reference = std::fs::read_dir(folder.path())
+            .expect("listed")
+            .map(|entry| entry.expect("an entry").path())
+            .find(|path| path.to_string_lossy().ends_with("reference.wav"))
+            .expect("a reference file");
+        let [reference, microphone, output, order] =
+            super::super::dump::siblings(&reference).expect("its files");
+        let read = |path| super::super::dump::read_wav(path).expect("a WAV file").1;
+        let (reference, microphone, output) = (read(&reference), read(&microphone), read(&output));
+        assert_eq!(microphone.len(), output.len());
+        assert_eq!(
+            microphone[..CHUNK],
+            mic[..CHUNK],
+            "the microphone as it came in"
+        );
+        let order = std::fs::read_to_string(order).expect("the order");
+        let stream = StreamConfig::new(RATE, 1);
+        let mut replay = AudioProcessing::builder()
+            .config(call_config())
+            .capture_config(stream)
+            .render_config(stream)
+            .build();
+        let mut scratch = [0.0_f32; CHUNK];
+        let mut fed = 0;
+        let mut replayed = Vec::new();
+        for (index, line) in order.lines().skip(1).enumerate() {
+            let (count, hint) = line.split_once(',').expect("two fields");
+            for _ in 0..count.parse::<usize>().expect("a count") {
+                let chunk = &reference[fed * CHUNK..(fed + 1) * CHUNK];
+                replay
+                    .process_render_f32(&[chunk], &mut [&mut scratch[..]])
+                    .expect("rendered");
+                fed += 1;
+            }
+            let _ = replay.set_stream_delay_ms(hint.parse().expect("a hint"));
+            replay
+                .process_capture_f32(
+                    &[&microphone[index * CHUNK..(index + 1) * CHUNK]],
+                    &mut [&mut scratch[..]],
+                )
+                .expect("processed");
+            replayed.extend_from_slice(&scratch);
+        }
+        assert_eq!(
+            fed * CHUNK,
+            reference.len(),
+            "every reference chunk is replayed"
+        );
+        assert!(fed > 0);
+        assert_eq!(
+            replayed, output,
+            "the replay is the call's output, sample for sample"
+        );
     }
 
     #[test]

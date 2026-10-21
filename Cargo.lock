@@ -8968,6 +8968,7 @@ dependencies = [
  "sha2",
  "skrifa",
  "sonora",
+ "sonora-aec3",
  "symphonia",
  "tempfile",
  "tokio",
