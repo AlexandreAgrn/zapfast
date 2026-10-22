@@ -93,7 +93,10 @@ const LOSS_CEILING: f64 = 0.9;
 /// call climbed back to its old rate within ten seconds of each loss, and lost again there.
 const PROBE_RISE: f64 = 1.02;
 /// Reported loss above this is congestion; below `LOSS_CLEAN` the path is clean. Between the two
-/// the rate holds, since a few percent is what a healthy wireless link loses anyway.
+/// the rate is not cut, since a few percent is what a healthy wireless link loses anyway, but it
+/// holds off rising as after congestion: a peer that never asks for a packet again freezes on any
+/// loss its repair packets cannot rebuild, and in a live call the rate kept climbing through a
+/// stretch of such losses, each one a frozen picture.
 const LOSS_CONGESTED: f64 = 0.10;
 const LOSS_CLEAN: f64 = 0.02;
 /// What one round of send-queue drops costs the rate.
@@ -424,9 +427,19 @@ impl RateControl {
             self.setting.bitrate = self.risen(self.setting.bitrate);
             Reason::Clean
         } else {
+            if loss >= LOSS_CLEAN {
+                self.congested_at = Some(now);
+            }
             return self.restep(now, before, Reason::Loss(loss));
         };
         self.restep(now, before, reason)
+    }
+
+    /// The peer asked for a keyframe: a picture it could not rebuild, so the rate holds off rising
+    /// for a while, as after congestion. Not cut, and no ceiling remembered: an iPhone asks once
+    /// near the start of a clean call too.
+    pub fn on_picture_lost(&mut self, now: Instant) {
+        self.congested_at = Some(now);
     }
 
     /// The latest round trip and the call's shortest, for the log.
@@ -903,17 +916,37 @@ mod tests {
     fn a_few_percent_holds_the_rate_and_a_clean_path_raises_it_slowly() {
         let (mut control, _) = control();
         let now = Instant::now();
-        assert_eq!(control.on_loss(12, now), None, "5% is held, not acted on");
+        assert_eq!(control.on_loss(12, now), None, "5% is not cut");
+        assert_eq!(
+            control.on_loss(0, now + Duration::from_secs(1)),
+            None,
+            "nor followed by a rise for a while"
+        );
+        let later = now + CONGESTION_HOLD;
         let change = control
-            .on_loss(0, now)
+            .on_loss(0, later)
             .expect("a clean report raises the rate");
         assert_eq!(change.reason, Reason::Clean);
         assert_eq!(change.to.bitrate, 756_000);
         assert_eq!(
-            control.on_loss(0, now + Duration::from_millis(300)),
+            control.on_loss(0, later + Duration::from_millis(300)),
             None,
             "at most once a second"
         );
+        // Under 2% is a clean path, and rises go on.
+        assert!(control.on_loss(4, later + Duration::from_secs(1)).is_some());
+    }
+
+    /// A keyframe request is a picture the peer could not rebuild: the rate stops climbing for a
+    /// while, but is not cut.
+    #[test]
+    fn a_lost_picture_holds_the_rate_from_rising() {
+        let (mut control, _) = control();
+        let now = Instant::now();
+        control.on_picture_lost(now);
+        assert_eq!(control.on_loss(0, now + Duration::from_secs(1)), None);
+        assert_eq!(control.setting().bitrate, START_BITRATE);
+        assert!(control.on_loss(0, now + CONGESTION_HOLD).is_some());
     }
 
     #[test]

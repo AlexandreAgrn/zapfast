@@ -2864,6 +2864,10 @@ impl Call {
                 let pipe = self.video_pipe.as_mut()?;
                 for item in feedback {
                     pipe.feedback.note(item.packet_type, item.fmt, &item.fci);
+                    // A PLI or a FIR: a picture the peer could not rebuild.
+                    if item.packet_type == 206 && matches!(item.fmt, 1 | 4) {
+                        pipe.rate.on_picture_lost(Instant::now());
+                    }
                 }
                 // The peer's native video report covers our video stream alone.
                 if *reports_video

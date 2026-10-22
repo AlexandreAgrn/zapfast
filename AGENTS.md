@@ -280,6 +280,9 @@ protocol. These notes are for coding agents and new contributors.
   never the rate, which a calm picture stays well under, it caps us at 90% of it, once word 0, the
   bytes received, passes 500 kB, since it starts from nothing), and climbs
   quickly back only to just under where loss was last reported, slowly past it;
+  loss from 2% to 10%, and each keyframe request, hold it from rising for
+  `CONGESTION_HOLD` without cutting it (an iPhone asks once near the start of
+  a clean call too);
   keyframes go out every five seconds unasked, and on the peer's request. In a
   1:1 call the library sends XOR repair packets (FEC) beside the video, which an
   iPhone relies on since it never NACKs; the rate chosen is the total on the
