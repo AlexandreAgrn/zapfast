@@ -96,6 +96,14 @@ const LOSS_CLEAN: f64 = 0.02;
 const DROP_CUT: f64 = 0.7;
 /// How long a receiver estimate keeps capping the rate after the last one arrived.
 const REMB_TTL: Duration = Duration::from_secs(10);
+/// The bytes the peer must have received before what it says it receives is read: its rate starts
+/// from nothing when the video does, and read earlier it held the call at the floor for seconds.
+const RECEIVING_AFTER_BYTES: u32 = 500_000;
+/// The share of our rate the peer must receive for the path to count as carrying it.
+const RECEIVING_SHORT: f64 = 0.75;
+/// The share of what the peer receives that a path falling short is sent: a little under, so the
+/// queue it built drains.
+const RECEIVING_CAP: f64 = 0.9;
 /// Our own audio streams the reports can name; a call has one, a renumbered one two.
 const AUDIO_SSRC_MEMORY: usize = 4;
 /// Round trip above the call's shortest that means a queue is filling on the path. A path at its
@@ -194,6 +202,8 @@ pub enum Reason {
     CaptureDrops,
     /// The peer's own estimate of what it can receive.
     Estimate(u32),
+    /// The peer receives only this much of our video, in bits per second: a queue on the path.
+    Receiving(u32),
     /// The round trip stood this far above the call's shortest: a queue on the path.
     Delay(Duration),
 }
@@ -381,6 +391,22 @@ impl RateControl {
         self.restep(now, before, Reason::Estimate(bitrate))
     }
 
+    /// What the peer says it receives of our video caps the rate, like its estimate, once it falls
+    /// well short of what we send: the path is queueing what it cannot carry, and the picture the
+    /// peer sees freezes and then rushes to catch up. Ignored until the peer has had half a
+    /// megabyte, since its rate starts from nothing when the video does.
+    pub fn on_peer_receiving(&mut self, receiving: PeerReceiving, now: Instant) -> Option<Change> {
+        if receiving.bytes <= RECEIVING_AFTER_BYTES
+            || receiving.bitrate == 0
+            || f64::from(receiving.bitrate) >= f64::from(self.setting.bitrate) * RECEIVING_SHORT
+        {
+            return None;
+        }
+        let before = self.setting;
+        self.estimate = Some((scale(receiving.bitrate, RECEIVING_CAP), now));
+        self.restep(now, before, Reason::Receiving(receiving.bitrate))
+    }
+
     /// A sign of congestion: the rate holds off rising, and a step up still on probation failed.
     fn congested(&mut self, now: Instant) {
         self.congested_at = Some(now);
@@ -503,6 +529,29 @@ pub fn remb_bitrate(fci: &[u8]) -> Option<u32> {
     let mantissa =
         (u64::from(fci[5] & 0x03) << 16) | (u64::from(*fci.get(6)?) << 8) | u64::from(*fci.get(7)?);
     Some(u32::try_from(mantissa << exponent.min(40)).unwrap_or(u32::MAX))
+}
+
+/// What the peer says it has received of our video, from the 24-byte WhatsApp extension it appends
+/// to its report block on our video stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerReceiving {
+    /// All the bytes received since the video started (word 0).
+    pub bytes: u32,
+    /// The rate it receives at now, in bits per second (word 5).
+    pub bitrate: u32,
+}
+
+/// Reads [`PeerReceiving`] from a report block's profile extension: big-endian 32-bit words, of
+/// which the first and the sixth are understood. `None` for one shorter than 24 bytes.
+pub fn peer_receiving(extension: &[u8]) -> Option<PeerReceiving> {
+    let word = |at: usize| {
+        let bytes = extension.get(at * 4..at * 4 + 4)?;
+        Some(u32::from_be_bytes(bytes.try_into().ok()?))
+    };
+    Some(PeerReceiving {
+        bytes: word(0)?,
+        bitrate: word(5)?,
+    })
 }
 
 /// What the peer's feedback has asked of our video over the call, for the log.
@@ -897,6 +946,61 @@ mod tests {
         );
         // An estimate that has gone quiet stops holding the rate down.
         assert!(control.on_loss(0, now + Duration::from_secs(11)).is_some());
+    }
+
+    /// A WhatsApp report extension with `bytes` in word 0 and `bitrate` in word 5.
+    fn extension(bytes: u32, bitrate: u32) -> Vec<u8> {
+        let mut extension = vec![0xee; 24];
+        extension[..4].copy_from_slice(&bytes.to_be_bytes());
+        extension[20..].copy_from_slice(&bitrate.to_be_bytes());
+        extension
+    }
+
+    #[test]
+    fn the_report_extension_says_what_the_peer_has_received() {
+        assert_eq!(
+            peer_receiving(&extension(1_234_567, 640_000)),
+            Some(PeerReceiving {
+                bytes: 1_234_567,
+                bitrate: 640_000,
+            })
+        );
+        assert_eq!(
+            peer_receiving(&extension(1_234_567, 640_000)[..23]),
+            None,
+            "too short to hold word 5"
+        );
+        assert_eq!(peer_receiving(&[]), None);
+    }
+
+    #[test]
+    fn the_peer_receiving_far_less_than_we_send_caps_the_rate() {
+        let (mut control, _) = control();
+        let now = Instant::now();
+        let receiving = |bytes, bitrate| PeerReceiving { bytes, bitrate };
+        // Before half a megabyte its rate is still climbing from nothing.
+        assert_eq!(
+            control.on_peer_receiving(receiving(RECEIVING_AFTER_BYTES, 100_000), now),
+            None
+        );
+        // Three quarters of what we send is a path carrying it.
+        assert_eq!(
+            control.on_peer_receiving(receiving(600_000, START_BITRATE * 3 / 4), now),
+            None
+        );
+        assert_eq!(control.setting().bitrate, START_BITRATE);
+        // Less is a queue: send a little under what gets through.
+        let change = control
+            .on_peer_receiving(receiving(600_000, 400_000), now)
+            .expect("a cap");
+        assert_eq!(change.reason, Reason::Receiving(400_000));
+        assert_eq!(change.to.bitrate, 360_000);
+        assert_eq!(change.to.tier().name, "480p");
+        assert_eq!(
+            control.on_loss(0, now + Duration::from_secs(1)),
+            None,
+            "capped like an estimate"
+        );
     }
 
     #[test]

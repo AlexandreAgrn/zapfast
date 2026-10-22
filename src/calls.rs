@@ -704,8 +704,9 @@ pub struct VideoPipeline {
     /// What the peer's RTCP feedback has asked of our video, for the heartbeat's log line.
     feedback: crate::video_rate::PeerFeedback,
     /// The WhatsApp extension of the peer's latest report on our video: 24 bytes of transport
-    /// statistics after the standard report block, whose fields are not decoded yet. Logged so a
-    /// call's numbers can be set beside what we know we sent.
+    /// statistics after the standard report block, of which only the bytes and the rate received
+    /// are decoded ([`crate::video_rate::peer_receiving`]). Logged whole so a call's numbers can be
+    /// set beside what we know we sent.
     report_extension: Vec<u8>,
     /// The peer's latest interarrival jitter for our video, in the 90 kHz clock, for the log.
     peer_jitter: Option<u32>,
@@ -786,6 +787,14 @@ impl VideoPipeline {
             estimates,
             Instant::now(),
         )
+    }
+
+    /// What the peer says it receives of our video, from its report's extension.
+    fn on_peer_receiving(
+        &mut self,
+        receiving: crate::video_rate::PeerReceiving,
+    ) -> Option<RateChange> {
+        self.rate.on_peer_receiving(receiving, Instant::now())
     }
 
     /// The relay connection could not take all the video queued for it.
@@ -1414,6 +1423,9 @@ fn log_rate_change(call_id: &str, change: RateChange) {
         Reason::SendDrops => "video was dropped before it was sent".to_owned(),
         Reason::CaptureDrops => "camera frames backed up before the engine".to_owned(),
         Reason::Estimate(bitrate) => format!("the peer can take {} kbps", bitrate / 1000),
+        Reason::Receiving(bitrate) => {
+            format!("the peer receives only {} kbps", bitrate / 1000)
+        }
         Reason::Delay(queued) => format!(
             "the round trip stood {} ms above its shortest",
             queued.as_millis()
@@ -2885,6 +2897,17 @@ impl Call {
                     .collect();
                 if let Some(change) =
                     pipe.on_rtcp(*reports_audio, *reports_video, &blocks, &estimates)
+                {
+                    log_rate_change(&self.call_id, change);
+                }
+                // After the estimates, so that a path falling short is capped at what it carries
+                // even when the same packet's REMB says more.
+                if *reports_video
+                    && !*reports_audio
+                    && let Some(block) = report_blocks.first()
+                    && let Some(receiving) =
+                        crate::video_rate::peer_receiving(&block.profile_extension)
+                    && let Some(change) = pipe.on_peer_receiving(receiving)
                 {
                     log_rate_change(&self.call_id, change);
                 }
@@ -4482,6 +4505,47 @@ mod tests {
             }
         );
         assert_eq!(pipe.report_extension, vec![0xab; 24]);
+    }
+
+    /// A report on our video alone whose extension says the peer receives far less than we send
+    /// caps the rate; the same extension on a report that covers audio as well does not.
+    #[test]
+    fn what_the_peer_receives_of_our_video_caps_the_rate() {
+        use whatsapp_rust::voip_control::MediaRtcpReportBlock;
+        let mut extension = vec![0; 24];
+        extension[..4].copy_from_slice(&2_000_000u32.to_be_bytes());
+        extension[20..].copy_from_slice(&400_000u32.to_be_bytes());
+        let report = |reports_audio: bool| CallEvent::RtcpReceived {
+            packet_types: vec![201],
+            sender_ssrc: 1,
+            referenced_ssrcs: vec![9],
+            reports_audio,
+            reports_video: true,
+            report_blocks: vec![
+                MediaRtcpReportBlock::builder()
+                    .ssrc(9)
+                    .fraction_lost(0)
+                    .cumulative_lost(0)
+                    .extended_highest_sequence(0)
+                    .jitter(0)
+                    .last_sender_report(0)
+                    .delay_since_last_sender_report(0)
+                    .profile_extension(extension.clone())
+                    .build(),
+            ],
+            feedback: Vec::new(),
+        };
+        let mut call = dialing();
+        call.video = true;
+        call.video_pipe = Some(pipeline_with_a_running_camera());
+        let rate = |call: &Call| call.video_pipe.as_ref().expect("video").rate().bitrate;
+        assert_eq!(call.media(&report(true)), None);
+        assert!(
+            rate(&call) >= crate::video_rate::START_BITRATE,
+            "not about our video alone: read only for its clean loss"
+        );
+        assert_eq!(call.media(&report(false)), None, "nothing for the screen");
+        assert_eq!(rate(&call), 360_000);
     }
 
     #[test]

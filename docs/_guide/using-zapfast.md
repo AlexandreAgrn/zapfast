@@ -466,9 +466,10 @@ program is using, still takes part in a video call: you see the other side, and
 your camera stays off.
 
 Your picture follows the connection. A call starts at a moderate quality and
-rises to 720p at 20 frames a second while the other side reports a clean
-connection; when it reports loss, or the connection cannot keep up, ZapFast
-sends a smaller picture at a lower frame rate rather than one that freezes.
+rises to 720p at 25 frames a second while the other side reports a clean
+connection; when it reports loss, or receives much less than ZapFast sends, or
+the connection cannot keep up, ZapFast sends a smaller picture rather than one
+that freezes.
 
 Calls open the system's default microphone and speaker, and the first camera.
 The pickers move a call to another device while it runs without changing your

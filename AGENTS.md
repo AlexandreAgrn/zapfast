@@ -273,8 +273,11 @@ protocol. These notes are for coding agents and new contributors.
   at most, 25 fps) into the library's timed `VideoSource`. `src/video_rate.rs`
   adapts the bitrate (from 700 kbit/s) and the step of size and frame rate
   (480p, 540p and 720p, all at 25 fps, preferring motion to size) to the peer's RTCP loss, its REMB, dropped video,
-  and queue delay (the round trip from its reports' LSR/DLSR above the call's
-  shortest, since a deep buffer holds seconds before it loses), and climbs
+  queue delay (the round trip from its reports' LSR/DLSR above the call's
+  shortest, since a deep buffer holds seconds before it loses), and the rate
+  the peer receives (word 5 of WhatsApp's 24-byte extension to its video
+  report block; below 75% of ours it caps us at 90% of it, once word 0, the
+  bytes received, passes 500 kB, since it starts from nothing), and climbs
   quickly back only to just under where loss was last reported, slowly past it;
   keyframes go out every five seconds unasked, and on the peer's request. The
   call's heartbeat logs both directions' frame counts, keyframes and decode
