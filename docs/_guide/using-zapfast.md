@@ -787,7 +787,8 @@ Reading a chat removes its tracked notifications, including Windows toasts.
 Fastframe provides the same delivery and cancellation interface on each platform. macOS
 asks once for permission to show notifications. On Linux, a notification that arrives while the
 window is open behind others also highlights ZapFast in the taskbar until you
-switch to it. Muted chats do not send notifications, and
+switch to it. GNOME and Hyprland get no highlight: GNOME would show a second
+notice, and Hyprland can bring the window to the front instead. Muted chats do not send notifications, and
 archived chats stay quiet while they remain archived. You can change both settings.
 To keep messages off the screen, turn off **Show message content in
 notifications** in Settings: notifications then say only "New message".

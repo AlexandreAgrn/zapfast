@@ -8667,15 +8667,22 @@ impl App {
     /// viewport too, since `window_focused` stays false behind the app lock
     /// even while the lock screen has the focus.
     fn request_attention(&mut self, ctx: &egui::Context) {
-        self.request_attention_on(ctx, fastframe_desktop::is_gnome());
+        let skip = fastframe_desktop::is_gnome()
+            || hyprland(
+                std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some(),
+                std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+            );
+        self.request_attention_on(ctx, skip);
     }
 
-    /// [`Self::request_attention`] on a desktop that is GNOME or not, which
-    /// shows its own "is ready" notice instead of marking the taskbar (#466).
-    fn request_attention_on(&mut self, ctx: &egui::Context, gnome: bool) {
+    /// [`Self::request_attention`] on a desktop that marks no taskbar entry
+    /// for the request (`skip`) or one that does. GNOME shows its own "is
+    /// ready" notice instead (#466), and Hyprland focuses the window when
+    /// `misc:focus_on_activate` is on (#530).
+    fn request_attention_on(&mut self, ctx: &egui::Context, skip: bool) {
         if std::mem::take(&mut self.wants_attention)
             && cfg!(target_os = "linux")
-            && !gnome
+            && !skip
             && !self.window_hidden
             && !self.window_focused
             && ctx.input(|input| input.viewport().focused) != Some(true)
@@ -10009,6 +10016,21 @@ fn is_user_input(event: &egui::Event) -> bool {
             | egui::Event::Touch { .. }
             | egui::Event::Ime(_)
     )
+}
+
+/// Whether the session is Hyprland, when both its instance signature and the
+/// desktop name say so, since either alone can be left over from another
+/// session (the rule `backdrop` uses). On Wayland an attention request is an
+/// xdg-activation request, and Hyprland focuses the window for it when
+/// `misc:focus_on_activate` is on, as Omarchy sets it: a window in a special
+/// workspace then opens that workspace over what the user is doing (#530).
+fn hyprland(signature: bool, desktop: Option<&str>) -> bool {
+    signature
+        && desktop.is_some_and(|desktop| {
+            desktop
+                .split(':')
+                .any(|name| name.trim().eq_ignore_ascii_case("Hyprland"))
+        })
 }
 
 fn notification_eligible(chat: &Chat, now: i64, message_at: i64) -> bool {
@@ -21649,6 +21671,19 @@ mod app_lock_tests {
         let ctx = egui::Context::default();
         app.request_attention_on(&ctx, false);
         assert!(!attention_requested(&ctx));
+    }
+
+    /// Hyprland is known by its instance signature and the desktop name
+    /// together, in any entry of the desktop list.
+    #[test]
+    fn hyprland_needs_its_signature_and_its_desktop_name() {
+        assert!(hyprland(true, Some("Hyprland")));
+        assert!(hyprland(true, Some("Hyprland:wlroots")));
+        assert!(hyprland(true, Some("hyprland")));
+        // A signature left over, or a desktop name alone, is not enough.
+        assert!(!hyprland(true, Some("KDE")));
+        assert!(!hyprland(true, None));
+        assert!(!hyprland(false, Some("Hyprland")));
     }
 
     /// Behind the app lock `window_focused` stays false, but a lock screen
