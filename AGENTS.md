@@ -279,7 +279,12 @@ protocol. These notes are for coding agents and new contributors.
   report block; below 75% of ours it caps us at 90% of it, once word 0, the
   bytes received, passes 500 kB, since it starts from nothing), and climbs
   quickly back only to just under where loss was last reported, slowly past it;
-  keyframes go out every five seconds unasked, and on the peer's request. The
+  keyframes go out every five seconds unasked, and on the peer's request. In a
+  1:1 call the library sends XOR repair packets (FEC) beside the video, which an
+  iPhone relies on since it never NACKs; the rate chosen is the total on the
+  wire, so each heartbeat measures FEC's bytes against the video sent
+  (`RateControl::on_fec_sent`, `MediaStats::video_fec_bytes_sent`) and the
+  encoder's target leaves room for them. The
   call's heartbeat logs both directions' frame counts, keyframes and decode
   failures, and the peer's H.264 profile (`src/call_diag.rs`);
   `ZAPFAST_CALL_VIDEO_DUMP=<folder>` writes both directions' access units as

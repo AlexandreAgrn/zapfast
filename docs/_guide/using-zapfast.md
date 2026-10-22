@@ -471,7 +471,10 @@ Your picture follows the connection. A call starts at a moderate quality and
 rises to 720p at 25 frames a second while the other side reports a clean
 connection; when it reports loss, or receives much less than ZapFast sends, or
 the connection cannot keep up, ZapFast sends a smaller picture rather than one
-that freezes.
+that freezes. In a one-to-one call some repair data goes with the picture, so
+the other side can rebuild a lost packet instead of freezing until the next
+full picture; it comes out of the same budget, so the call uses no more of your
+connection.
 
 Calls open the system's default microphone and speaker, and the first camera.
 The pickers move a call to another device while it runs without changing your

@@ -807,6 +807,12 @@ impl VideoPipeline {
         self.rate.on_capture_drops(Instant::now())
     }
 
+    /// The FEC bytes the engine has sent so far in the call, which the encoder's share of the rate
+    /// is measured against.
+    fn on_fec_sent(&mut self, fec_bytes_total: u64) {
+        self.rate.on_fec_sent(fec_bytes_total);
+    }
+
     fn source(&self) -> LocalVideoSource {
         let (empty_tx, empty) = async_channel::bounded::<Vec<u8>>(1);
         drop(empty_tx);
@@ -1137,7 +1143,8 @@ fn capture_frames(
             }
         }
         plan.setting.bitrate = wanted.bitrate;
-        encoder.set_bitrate(wanted.bitrate);
+        // The rate chosen is what goes on the wire, and the engine's FEC takes its share of it.
+        encoder.set_bitrate(controls.rate.encoder_bitrate(wanted));
 
         let send = countdown == 0;
         let read = if send {
@@ -1207,6 +1214,7 @@ fn capture_frames(
                 Ok(unit) => {
                     controls.diag.counters.sent(&unit);
                     controls.diag.sent.write(&unit);
+                    let len = unit.len();
                     let frame = TimedVideoFrame::builder()
                         .data(unit)
                         .timestamp(clock.stamp(captured))
@@ -1217,8 +1225,11 @@ fn capture_frames(
                     if timed.try_send(frame).is_err() {
                         resync = true;
                         controls.rate.note_queue_drop();
-                    } else if keyframe {
-                        resync = false;
+                    } else {
+                        controls.rate.note_sent(len);
+                        if keyframe {
+                            resync = false;
+                        }
                     }
                 }
                 Err(error) => log::warn!("[CALL] camera frame could not be encoded: {error}"),
@@ -2945,6 +2956,19 @@ impl Call {
         }
     }
 
+    /// Takes the share of our video's wire the engine's FEC used since the last heartbeat out of
+    /// the encoder's target, so video and FEC together stay at the rate the rate control chose.
+    /// Called from the call heartbeat.
+    pub fn budget_video_fec(&mut self) {
+        let Some(handle) = self.handle.as_ref() else {
+            return;
+        };
+        let fec_bytes = handle.media_stats().video_fec_bytes_sent;
+        if let Some(pipe) = self.video_pipe.as_mut() {
+            pipe.on_fec_sent(fec_bytes);
+        }
+    }
+
     /// Reads the engine's media counters into the log, so a call that is up but not carrying audio
     /// can be diagnosed from a bug report rather than guessed at. Called from the call heartbeat.
     pub fn log_media_stats(&self) {
@@ -2985,7 +3009,8 @@ impl Call {
                  peer_nacked_packets={} peer_plis={} peer_firs={} peer_estimates={} \
                  peer_estimate_kbps={} rtt_ms={} rtt_floor_ms={} peer_jitter_ms={} \
                  peer_report_extension={} encoded_frames={} keyframes={} largest_keyframe_kb={} \
-                 peer_frames_decoded={} peer_frames_undecodable={}",
+                 peer_frames_decoded={} peer_frames_undecodable={} encoder_kbps={} \
+                 fec_packets_total={} fec_kb_total={}",
                 self.call_id,
                 marker,
                 rate.bitrate / 1000,
@@ -3008,6 +3033,9 @@ impl Call {
                 counts.largest_keyframe / 1024,
                 counts.decoded,
                 counts.undecodable,
+                pipe.rate_share.encoder_bitrate(rate) / 1000,
+                stats.video_fec_sent,
+                stats.video_fec_bytes_sent / 1024,
             );
         }
         self.log_audio_path(marker);

@@ -11,11 +11,15 @@
 //! taken at once; a step up only once the rate has held for a while, because a new picture size
 //! starts with a keyframe and a keyframe is the most expensive thing to send.
 //!
+//! The rate chosen is what goes on the wire, and in a 1:1 call the library sends XOR forward error
+//! correction beside the video: about one repair packet per eight video packets, one per four under
+//! loss. So the encoder is given the rate less FEC's share, measured from what was sent.
+//!
 //! [`RateControl`] is plain state driven by the peer's reports, so it can be tested without a call;
 //! [`RateShare`] is what it publishes for the capture thread, which reads it between frames.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// One step of picture size and frame rate.
@@ -116,16 +120,26 @@ const RISE_DELAY: Duration = Duration::from_millis(100);
 /// drain once the rate is under what the path carries, so the next reports still show it.
 const DELAY_CUT: f64 = 0.85;
 const DELAY_CUT_EVERY: Duration = Duration::from_secs(1);
+/// The least share of the rate the encoder is given. The library sends at most one FEC packet per
+/// two video packets, a third of what goes out, so a measurement past that is noise.
+const MIN_VIDEO_SHARE: f64 = 2.0 / 3.0;
+/// The encoded video a measurement of FEC's share waits for: a few frames even at the lowest rate,
+/// so one frame's last repair packet does not swing it. Until then the last share holds.
+const FEC_MEASURE_BYTES: u64 = 32 * 1024;
 /// Seconds between the NTP era (1900) and the Unix one.
 const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
 
 /// What the capture thread reads between frames: the rate and the step, as the controller last
-/// set them. And the one thing it reports back: frames it could not hand to the engine.
+/// set them, and the share of that rate the encoder gets once FEC has had its own. And what it
+/// reports back: frames it could not hand to the engine, and the bytes of those it could.
 #[derive(Debug)]
 pub struct RateShare {
     bitrate: AtomicU32,
     tier: AtomicUsize,
+    /// The encoder's share of the rate, in millionths.
+    video_share: AtomicU32,
     queue_drops: AtomicU32,
+    sent_bytes: AtomicU64,
 }
 
 impl Default for RateShare {
@@ -134,9 +148,27 @@ impl Default for RateShare {
         Self {
             bitrate: AtomicU32::new(start.bitrate),
             tier: AtomicUsize::new(start.tier),
+            video_share: AtomicU32::new(millionths(configured_video_share(
+                whatsapp_rust::voip::VideoFecConfig::default(),
+            ))),
             queue_drops: AtomicU32::new(0),
+            sent_bytes: AtomicU64::new(0),
         }
     }
+}
+
+/// The encoder's share of the rate a FEC configuration leaves before anything was measured: one
+/// repair packet per `clean_group` video packets, about as large as they are.
+pub fn configured_video_share(config: whatsapp_rust::voip::VideoFecConfig) -> f64 {
+    if !config.enabled {
+        return 1.0;
+    }
+    let group = f64::from(config.clean_group.clamp(2, 8));
+    group / (group + 1.0)
+}
+
+fn millionths(share: f64) -> u32 {
+    (share.clamp(0.0, 1.0) * 1e6).round() as u32
 }
 
 impl RateShare {
@@ -160,6 +192,52 @@ impl RateShare {
     /// The frames dropped that way since the last time this was asked.
     pub fn take_queue_drops(&self) -> u32 {
         self.queue_drops.swap(0, Ordering::Relaxed)
+    }
+
+    /// The capture thread handed an access unit of `bytes` to the engine.
+    pub fn note_sent(&self, bytes: usize) {
+        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+        self.sent_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    /// The encoded video handed to the engine so far in the call.
+    pub fn sent_bytes(&self) -> u64 {
+        self.sent_bytes.load(Ordering::Relaxed)
+    }
+
+    /// The share of the rate the encoder gets, the rest left to FEC.
+    pub fn video_share(&self) -> f64 {
+        f64::from(self.video_share.load(Ordering::Relaxed)) / 1e6
+    }
+
+    /// The bitrate the encoder runs at for `setting`: its rate less what FEC takes on the wire.
+    pub fn encoder_bitrate(&self, setting: Setting) -> u32 {
+        scale(setting.bitrate, self.video_share())
+    }
+}
+
+/// Measures FEC's share of the video on the wire, from the call's running totals.
+#[derive(Debug, Default)]
+struct FecBudget {
+    /// The totals at the last measurement.
+    video: u64,
+    fec: u64,
+}
+
+impl FecBudget {
+    /// The encoder's share of the wire since the last measurement, from the encoded video and the
+    /// FEC bytes sent so far in the call. `None` until enough video went out to tell, the interval
+    /// then running on into the next reading.
+    fn observe(&mut self, video_total: u64, fec_total: u64) -> Option<f64> {
+        let video = video_total.saturating_sub(self.video);
+        let fec = fec_total.saturating_sub(self.fec);
+        if video < FEC_MEASURE_BYTES {
+            return None;
+        }
+        self.video = video_total;
+        self.fec = fec_total;
+        let share = video as f64 / (video as f64 + fec as f64);
+        Some(share.clamp(MIN_VIDEO_SHARE, 1.0))
     }
 }
 
@@ -242,6 +320,7 @@ pub struct RateControl {
     /// Our own audio SSRCs, learnt from reports that cover audio alone, so that a report covering
     /// both directions of media can be read for its video block alone.
     audio_ssrcs: Vec<u32>,
+    fec: FecBudget,
     share: Arc<RateShare>,
 }
 
@@ -262,12 +341,24 @@ impl RateControl {
             round_trip: None,
             delay_cut_at: None,
             audio_ssrcs: Vec::new(),
+            fec: FecBudget::default(),
             share,
         }
     }
 
     pub fn setting(&self) -> Setting {
         self.setting
+    }
+
+    /// The FEC bytes the engine has sent so far in the call, read against the video the capture
+    /// thread handed it, so the encoder is given the rate less FEC's measured share and the two
+    /// together stay at the rate chosen. Returns the encoder's new share once measured.
+    pub fn on_fec_sent(&mut self, fec_total: u64) -> Option<f64> {
+        let share = self.fec.observe(self.share.sent_bytes(), fec_total)?;
+        self.share
+            .video_share
+            .store(millionths(share), Ordering::Relaxed);
+        Some(share)
     }
 
     /// One RTCP packet from the peer. `blocks` are its report blocks as `(ssrc, fraction lost)`,
@@ -1000,6 +1091,45 @@ mod tests {
             control.on_loss(0, now + Duration::from_secs(1)),
             None,
             "capped like an estimate"
+        );
+    }
+
+    #[test]
+    fn before_anything_is_measured_the_encoder_leaves_room_for_the_configured_fec() {
+        use whatsapp_rust::voip::VideoFecConfig;
+        let (control, share) = control();
+        // The library's default: one repair packet per eight video packets.
+        let expected = scale(START_BITRATE, 8.0 / 9.0);
+        assert_eq!(share.encoder_bitrate(control.setting()), expected);
+        assert_eq!(configured_video_share(VideoFecConfig::disabled()), 1.0);
+    }
+
+    #[test]
+    fn the_encoder_gets_the_rate_less_the_fec_measured_on_the_wire() {
+        let (mut control, share) = control();
+        let setting = control.setting();
+        // Too little video yet to tell: the configured share holds, and the interval runs on.
+        share.note_sent(20_000);
+        assert_eq!(control.on_fec_sent(4_000), None);
+        // 100 kB of video and 25 kB of FEC over the two readings: the encoder gets four fifths.
+        share.note_sent(80_000);
+        assert_eq!(control.on_fec_sent(25_000), Some(0.8));
+        assert_eq!(share.encoder_bitrate(setting), scale(setting.bitrate, 0.8));
+        // A call that sends no FEC (a group call) gives the encoder the whole rate.
+        share.note_sent(100_000);
+        assert_eq!(control.on_fec_sent(25_000), Some(1.0));
+        assert_eq!(share.encoder_bitrate(setting), setting.bitrate);
+    }
+
+    #[test]
+    fn fec_never_takes_more_than_a_third_of_the_rate() {
+        let (mut control, share) = control();
+        share.note_sent(40_000);
+        assert_eq!(control.on_fec_sent(80_000), Some(MIN_VIDEO_SHARE));
+        let setting = control.setting();
+        assert_eq!(
+            share.encoder_bitrate(setting),
+            scale(setting.bitrate, MIN_VIDEO_SHARE)
         );
     }
 

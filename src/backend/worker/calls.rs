@@ -914,6 +914,7 @@ impl Worker {
         // these numbers are what tell the two apart.
         if let Some(runtime) = self.call.as_mut() {
             runtime.call.check_video_queue();
+            runtime.call.budget_video_fec();
             runtime.call.log_media_stats();
         }
         // Discovery opens every audio device and asks every camera to name itself, so it runs on a
