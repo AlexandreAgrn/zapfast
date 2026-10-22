@@ -4565,7 +4565,16 @@ mod tests {
         };
         let mut call = dialing();
         call.video = true;
-        call.video_pipe = Some(pipeline_with_a_running_camera());
+        let mut pipe = pipeline_with_a_running_camera();
+        // Two seconds ago nothing had been sent; since then 700 kbit/s has.
+        let earlier = Instant::now() - std::time::Duration::from_secs(2);
+        let nothing_yet = crate::video_rate::PeerReceiving {
+            bytes: 0,
+            bitrate: 0,
+        };
+        assert_eq!(pipe.rate.on_peer_receiving(nothing_yet, earlier), None);
+        pipe.rate_share.note_sent(175_000);
+        call.video_pipe = Some(pipe);
         let rate = |call: &Call| call.video_pipe.as_ref().expect("video").rate().bitrate;
         assert_eq!(call.media(&report(true)), None);
         assert!(

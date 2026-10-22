@@ -103,8 +103,12 @@ const REMB_TTL: Duration = Duration::from_secs(10);
 /// The bytes the peer must have received before what it says it receives is read: its rate starts
 /// from nothing when the video does, and read earlier it held the call at the floor for seconds.
 const RECEIVING_AFTER_BYTES: u32 = 500_000;
-/// The share of our rate the peer must receive for the path to count as carrying it.
+/// The share of what we sent that the peer must receive for the path to count as carrying it.
 const RECEIVING_SHORT: f64 = 0.75;
+/// How far back what we sent is measured, to set beside what the peer says it receives; at least
+/// [`SENT_SPAN_MIN`] of it before anything is compared.
+const SENT_SPAN: Duration = Duration::from_secs(3);
+const SENT_SPAN_MIN: Duration = Duration::from_secs(1);
 /// The share of what the peer receives that a path falling short is sent: a little under, so the
 /// queue it built drains.
 const RECEIVING_CAP: f64 = 0.9;
@@ -317,6 +321,10 @@ pub struct RateControl {
     round_trip_floor: Option<Duration>,
     round_trip: Option<Duration>,
     delay_cut_at: Option<Instant>,
+    /// The video handed to the engine so far, at each of the peer's recent reports of what it
+    /// receives: what we actually sent over the last few seconds, which a calm picture keeps well
+    /// under the rate.
+    sent: std::collections::VecDeque<(Instant, u64)>,
     /// Our own audio SSRCs, learnt from reports that cover audio alone, so that a report covering
     /// both directions of media can be read for its video block alone.
     audio_ssrcs: Vec<u32>,
@@ -340,6 +348,7 @@ impl RateControl {
             round_trip_floor: None,
             round_trip: None,
             delay_cut_at: None,
+            sent: std::collections::VecDeque::new(),
             audio_ssrcs: Vec::new(),
             fec: FecBudget::default(),
             share,
@@ -483,19 +492,38 @@ impl RateControl {
     }
 
     /// What the peer says it receives of our video caps the rate, like its estimate, once it falls
-    /// well short of what we send: the path is queueing what it cannot carry, and the picture the
+    /// well short of what we sent: the path is queueing what it cannot carry, and the picture the
     /// peer sees freezes and then rushes to catch up. Ignored until the peer has had half a
-    /// megabyte, since its rate starts from nothing when the video does.
+    /// megabyte, since its rate starts from nothing when the video does. Set beside what the
+    /// encoder actually made, never the rate: a calm picture comes out well under the rate, and
+    /// read against the rate each cap made the next one, down to the floor.
     pub fn on_peer_receiving(&mut self, receiving: PeerReceiving, now: Instant) -> Option<Change> {
+        let sent = self.sent_rate(now)?;
         if receiving.bytes <= RECEIVING_AFTER_BYTES
             || receiving.bitrate == 0
-            || f64::from(receiving.bitrate) >= f64::from(self.setting.bitrate) * RECEIVING_SHORT
+            || f64::from(receiving.bitrate) >= sent * RECEIVING_SHORT
         {
             return None;
         }
         let before = self.setting;
         self.estimate = Some((scale(receiving.bitrate, RECEIVING_CAP), now));
         self.restep(now, before, Reason::Receiving(receiving.bitrate))
+    }
+
+    /// The encoded video's bitrate over the last few seconds, once a second of it is known.
+    fn sent_rate(&mut self, now: Instant) -> Option<f64> {
+        self.sent.push_back((now, self.share.sent_bytes()));
+        while self
+            .sent
+            .get(1)
+            .is_some_and(|&(at, _)| now.duration_since(at) >= SENT_SPAN)
+        {
+            self.sent.pop_front();
+        }
+        let &(since, before) = self.sent.front()?;
+        let span = now.duration_since(since);
+        (span >= SENT_SPAN_MIN)
+            .then(|| (self.share.sent_bytes() - before) as f64 * 8.0 / span.as_secs_f64())
     }
 
     /// A sign of congestion: the rate holds off rising, and a step up still on probation failed.
@@ -1066,17 +1094,25 @@ mod tests {
 
     #[test]
     fn the_peer_receiving_far_less_than_we_send_caps_the_rate() {
-        let (mut control, _) = control();
-        let now = Instant::now();
+        let (mut control, share) = control();
+        let start = Instant::now();
         let receiving = |bytes, bitrate| PeerReceiving { bytes, bitrate };
+        // Nothing is compared before a second of what we sent is known.
+        assert_eq!(
+            control.on_peer_receiving(receiving(600_000, 100_000), start),
+            None
+        );
+        // A second at 600 kbit/s.
+        share.note_sent(75_000);
+        let now = start + Duration::from_secs(1);
         // Before half a megabyte its rate is still climbing from nothing.
         assert_eq!(
             control.on_peer_receiving(receiving(RECEIVING_AFTER_BYTES, 100_000), now),
             None
         );
-        // Three quarters of what we send is a path carrying it.
+        // Three quarters of what we sent is a path carrying it.
         assert_eq!(
-            control.on_peer_receiving(receiving(600_000, START_BITRATE * 3 / 4), now),
+            control.on_peer_receiving(receiving(600_000, 450_000), now),
             None
         );
         assert_eq!(control.setting().bitrate, START_BITRATE);
@@ -1092,6 +1128,26 @@ mod tests {
             None,
             "capped like an estimate"
         );
+    }
+
+    /// A calm picture leaves the encoder well under the rate. The peer receiving all of that is a
+    /// path carrying it, not a queue, however far it is under the rate.
+    #[test]
+    fn a_calm_picture_under_the_rate_is_not_read_as_a_queue() {
+        let (mut control, share) = control();
+        let start = Instant::now();
+        let receiving = |bitrate| PeerReceiving {
+            bytes: 2_000_000,
+            bitrate,
+        };
+        assert_eq!(control.on_peer_receiving(receiving(300_000), start), None);
+        for second in 1..=10 {
+            // 300 kbit/s made at a 700 kbit/s rate, and all of it received.
+            share.note_sent(37_500);
+            let now = start + Duration::from_secs(second);
+            assert_eq!(control.on_peer_receiving(receiving(300_000), now), None);
+        }
+        assert_eq!(control.setting().bitrate, START_BITRATE);
     }
 
     #[test]

@@ -276,7 +276,8 @@ protocol. These notes are for coding agents and new contributors.
   queue delay (the round trip from its reports' LSR/DLSR above the call's
   shortest, since a deep buffer holds seconds before it loses), and the rate
   the peer receives (word 5 of WhatsApp's 24-byte extension to its video
-  report block; below 75% of ours it caps us at 90% of it, once word 0, the
+  report block; below 75% of what the encoder made over the last few seconds,
+  never the rate, which a calm picture stays well under, it caps us at 90% of it, once word 0, the
   bytes received, passes 500 kB, since it starts from nothing), and climbs
   quickly back only to just under where loss was last reported, slowly past it;
   keyframes go out every five seconds unasked, and on the peer's request. In a
