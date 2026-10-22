@@ -18747,8 +18747,8 @@ mod rail_tests {
         }
     }
 
-    /// The rail stands at the window's left edge beside the list, with Chats,
-    /// Calls and Starred at its top and Settings and our avatar at its foot;
+    /// The rail stands at the window's left edge beside the list, with Chats
+    /// and Calls at its top and Starred, Settings and our avatar at its foot;
     /// with the list hidden, the chats' avatars fill it between the two. On
     /// macOS it starts below the traffic lights.
     #[test]
@@ -18766,15 +18766,33 @@ mod rail_tests {
                 header.left() >= rail.right(),
                 "{macos}: the list is beside it"
             );
-            let top = [Destination::Chats, Destination::Calls, Destination::Starred]
+            let top = [Destination::Chats, Destination::Calls]
                 .map(|destination| destination_rect(&ctx, destination));
+            let starred = destination_rect(&ctx, Destination::Starred);
+            let shown_starred = starred;
             let settings = destination_rect(&ctx, Destination::Settings);
             let shown_settings = settings;
             let me = stop_rect(&ctx, Stop::Profile).expect("our avatar is drawn");
-            for rect in top.iter().chain([&settings, &me]) {
+            for rect in top.iter().chain([&starred, &settings, &me]) {
                 assert!(rail.contains_rect(*rect), "{macos}: {rect:?} in {rail:?}");
             }
-            assert!(top[0].bottom() <= top[1].top() && top[1].bottom() <= top[2].top());
+            assert!(top[0].bottom() <= top[1].top());
+            // Starred heads the bottom group, a plate and a gap above
+            // Archived, or Settings when nothing is archived or locked.
+            let below = if Destination::Archived.offered(&app) {
+                destination_rect(&ctx, Destination::Archived)
+            } else {
+                settings
+            };
+            assert!(
+                (below.top() - starred.bottom() - 8.0).abs() < 0.5,
+                "{macos}: Starred directly above the next bottom button: {starred:?} {below:?}"
+            );
+            assert!(
+                starred.top() > top[1].bottom() + 100.0,
+                "{macos}: at the foot"
+            );
+            assert_eq!(starred.size(), egui::vec2(36.0, 36.0));
             assert!(
                 (me.top() - settings.bottom() - 8.0).abs() < 0.5
                     && (rail.bottom() - me.bottom() - 8.0).abs() < 0.5,
@@ -18810,11 +18828,13 @@ mod rail_tests {
             let chats = destination_rect(&ctx, Destination::Chats);
             let starred = destination_rect(&ctx, Destination::Starred);
             let settings = destination_rect(&ctx, Destination::Settings);
+            let calls = destination_rect(&ctx, Destination::Calls);
             let show = stop_rect(&ctx, Stop::Sidebar).expect("Show the chat list");
-            assert!(rail.contains_rect(show) && show.top() >= starred.bottom());
+            assert!(rail.contains_rect(show) && show.top() >= calls.bottom());
             // Nothing the list's toggle leaves in place moves.
             assert_eq!(chats, top[0], "{macos}: Chats stays put");
-            assert_eq!(starred, top[2], "{macos}: Starred stays put");
+            assert_eq!(calls, top[1], "{macos}: Calls stays put");
+            assert_eq!(starred, shown_starred, "{macos}: Starred stays put");
             assert_eq!(settings, shown_settings, "{macos}: Settings stays put");
             let first = app.visible_chats()[0].id.clone();
             let avatar = recorded(&ctx, crate::ui::chats::compact_chat_id(&first))
@@ -18824,8 +18844,8 @@ mod rail_tests {
                 "{macos}: {avatar:?} in {rail:?}"
             );
             assert!(
-                avatar.top() >= starred.bottom() && avatar.bottom() <= settings.top(),
-                "{macos}: between the destinations and Settings: {avatar:?}"
+                avatar.top() >= calls.bottom() && avatar.bottom() <= starred.top(),
+                "{macos}: between the top group and Starred: {avatar:?}"
             );
             // Under Show the chat list, which takes a cell of its own.
             assert!(avatar.top() >= show.bottom());

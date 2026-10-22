@@ -1,5 +1,5 @@
 //! The navigation rail on the left of the chat list, as WhatsApp's desktop
-//! clients have it: Chats, Calls and Starred at the top; Archived and Locked
+//! clients have it: Chats and Calls at the top; Starred, Archived and Locked
 //! chats (while there are any), Settings and our own avatar (the account
 //! switcher) at the bottom. While the chat list is hidden, the chats'
 //! avatars fill the rail between the two, so every chat is still one click
@@ -17,8 +17,8 @@ use super::widgets;
 
 /// Width of the rail, on every platform.
 pub const WIDTH: f32 = 52.0;
-/// Height of one destination at the top: the list header's title, search
-/// field and chips sit level with Chats, Calls and Starred.
+/// Height of one destination at the top: the list header's title and
+/// search field sit level with Chats and Calls.
 const CELL: f32 = 48.0;
 /// The lit square behind a destination's icon.
 const PLATE: f32 = 36.0;
@@ -178,6 +178,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
             ui.add_space(GAP);
         }
         let bottom: Vec<Destination> = [
+            Destination::Starred,
             Destination::Archived,
             Destination::Locked,
             Destination::Settings,
@@ -186,7 +187,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
         .filter(|destination| destination.offered(app))
         .collect();
         let foot = bottom.len() as f32 * (PLATE + GAP) + GAP + AVATAR + GAP;
-        let minimum = 3.0 * CELL
+        let minimum = 2.0 * CELL
             + foot
             + if hidden {
                 CELL + GAP + MIN_AVATARS
@@ -203,11 +204,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, hidden: bool) {
                 // the content keeps its minimum height and scrolls instead
                 // of leaving the bottom buttons beyond the window.
                 ui.set_height(height);
-                for destination in [Destination::Chats, Destination::Calls, Destination::Starred] {
+                for destination in [Destination::Chats, Destination::Calls] {
                     destination_button(app, ui, &palette, destination, CELL);
                 }
                 if hidden {
-                    // A cell of its own under Starred: nothing above it moves
+                    // A cell of its own under Calls: nothing above it moves
                     // when the list comes and goes.
                     show_list_button(app, ui, &palette);
                     ui.add_space(GAP / 2.0);

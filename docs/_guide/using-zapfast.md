@@ -114,7 +114,8 @@ by sender, time, and a short summary.
 **Development builds** can star messages. Right-click a message and choose
 **Star**; once WhatsApp confirms it, a small star shows beside the message's
 time. Stars made on your phone or another linked device show up here too, and
-the other way round. The star in the rail on the left of the chat list opens
+the other way round. The star near the foot of the rail on the left of the chat list, above
+**Archived** and **Settings**, opens
 **Starred**, which lists every starred message, newest star first, with its
 chat's name and when it was starred. Text shows as written; a photo, video,
 document, or voice message shows the same label the chat list uses. Clicking a
@@ -742,15 +743,15 @@ wearing it, channels included. A label is one more chip: picking it lets go of
 the other chips, it does not narrow search or the archive. Click the active
 label chip again, or **All**, to see every chat.
 
-A thin rail runs down the left of the chat list: **Chats**, **Calls**
-(`Ctrl+Shift+1` and `Ctrl+Shift+2`, Command on macOS) and **Starred** at the
-top, the one on screen lit; **Archived** and **Locked** (while you have
-archived or locked chats), **Settings**, and your own picture (the account
-switcher) at the bottom. The chat list's header keeps its title, **New
+A thin rail runs down the left of the chat list: **Chats** and **Calls**
+(`Ctrl+Shift+1` and `Ctrl+Shift+2`, Command on macOS) at the top;
+**Starred**, **Archived** and **Locked** (while you have archived or locked
+chats), **Settings**, and your own picture (the account switcher) at the
+bottom. The one on screen is lit. The chat list's header keeps its title, **New
 chat**, and the button beside it (`Ctrl+B`), which hides the list: the chats'
 avatars then fill the rail between its top and bottom buttons. Unread chats
 show their badge, hovering names a chat, clicking opens it, and `Ctrl+B` or
-the button under **Starred** brings the full list back.
+the button under **Calls** brings the full list back.
 In a short window, scroll the rail to reach its lower buttons. Tab and
 Shift+Tab bring the focused button into view, too.
 
