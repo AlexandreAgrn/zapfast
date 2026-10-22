@@ -7974,6 +7974,55 @@ mod tests {
     }
 
     #[test]
+    fn shift_insert_pastes_the_clipboard_text() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.focus_composer = true;
+        render(&mut app, &ctx);
+        // The fixture keeps the test away from the system clipboard.
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("fixture-clipboard-text"),
+                "ñandú ✓".to_owned(),
+            );
+        });
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Insert, egui::Modifiers::SHIFT)],
+        );
+        assert_eq!(app.composer, "ñandú ✓");
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![key(egui::Key::Insert, egui::Modifiers::NONE)],
+        );
+        assert_eq!(app.composer, "ñandú ✓", "Insert alone inserts nothing");
+    }
+
+    #[test]
+    fn shift_insert_paste_keeps_its_place_among_the_frame_events() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.focus_composer = true;
+        render(&mut app, &ctx);
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("fixture-clipboard-text"), "ab".to_owned());
+        });
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![
+                key(egui::Key::Insert, egui::Modifiers::SHIFT),
+                egui::Event::Text("!".into()),
+            ],
+        );
+        assert_eq!(app.composer, "ab!", "the paste comes before later text");
+    }
+
+    #[test]
     fn clicking_empty_conversation_space_returns_focus_to_the_composer() {
         let mut app = app();
         let ctx = egui::Context::default();
