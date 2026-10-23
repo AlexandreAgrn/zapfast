@@ -16,6 +16,14 @@ use crate::model::{
 use crate::settings::ThemeChoice;
 
 const ME: &str = "15550001111@s.whatsapp.net";
+/// Family, the sample group we run.
+const FAMILY: &str = "120363098765432109@g.us";
+/// A member of every sample group.
+const JONAS: &str = "491701111111@s.whatsapp.net";
+/// A contact in no group, offered by Add members.
+const DOROTHY: &str = "12025550137@s.whatsapp.net";
+/// A made-up invite link for the sample group.
+const DEMO_INVITE_LINK: &str = "https://chat.whatsapp.com/DemoFamilyInvite2026";
 
 struct Sample {
     id: &'static str,
@@ -517,6 +525,30 @@ pub fn populate(app: &mut App) {
             // but we are an admin, and Section 8 Berlin is locked for us.
             chat.info_locked = Some(sample.name != "Rust Berlin");
             chat.admin = sample.name == "Family";
+            // Family is ours to run, with Mira as a second admin; Rust Berlin
+            // lets its members add people and share its link; Section 8
+            // Berlin is Tom's announcement group.
+            chat.group_settings = Some(match sample.name {
+                "Family" => crate::model::GroupSettings {
+                    approval: true,
+                    admins: vec![ME.to_owned(), group_members[1].0.to_owned()],
+                    super_admins: vec![ME.to_owned()],
+                    ..Default::default()
+                },
+                "Rust Berlin" => crate::model::GroupSettings {
+                    members_add: true,
+                    members_share_link: true,
+                    admins: vec![group_members[0].0.to_owned()],
+                    super_admins: vec![group_members[0].0.to_owned()],
+                    ..Default::default()
+                },
+                _ => crate::model::GroupSettings {
+                    announce: true,
+                    admins: vec![group_members[2].0.to_owned()],
+                    super_admins: vec![group_members[2].0.to_owned()],
+                    ..Default::default()
+                },
+            });
             chat.group_description = Some(if sample.name == "Rust Berlin" {
                 "Rust meetups in Berlin 🦀\nShare projects, ask questions, and help each other learn.\nNext meetup: Thursday at 19:00.".to_owned()
             } else {
@@ -2801,6 +2833,53 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 };
                 if let Some(chat) = app.open_chat.clone() {
                     info_sample(app, &chat, view);
+                }
+            }
+            "group-admin"
+            | "group-admin-menu"
+            | "group-permissions"
+            | "group-add-members"
+            | "group-reset-link"
+            | "group-remove-member" => {
+                // Family, which we run: its invite link, its permissions, a
+                // member's menu, and the dialogs its actions open.
+                let group = FAMILY;
+                app.open_chat = Some(group.to_owned());
+                let view = if part == "group-permissions" {
+                    InfoView::Permissions
+                } else {
+                    InfoView::Overview
+                };
+                info_sample(app, group, view);
+                app.info_invite = Some((
+                    group.to_owned(),
+                    crate::group_admin::LinkState::Known(
+                        crate::group_admin::InviteLink::new(DEMO_INVITE_LINK.to_owned())
+                            .expect("a WhatsApp link"),
+                    ),
+                ));
+                match part {
+                    "group-admin-menu" => app.open_member_menu = Some(JONAS.to_owned()),
+                    "group-add-members" => {
+                        let existing = app
+                            .chat(group)
+                            .map(|chat| chat.participants.clone())
+                            .unwrap_or_default();
+                        let mut draft = crate::new_group::Draft::adding(group.to_owned(), existing);
+                        draft.toggle(DOROTHY);
+                        app.new_group = Some(draft);
+                        app.dialog = Some(Dialog::AddGroupMembers(group.to_owned()));
+                    }
+                    "group-reset-link" => {
+                        app.dialog = Some(Dialog::ConfirmResetInviteLink(group.to_owned()))
+                    }
+                    "group-remove-member" => {
+                        app.dialog = Some(Dialog::ConfirmRemoveMember {
+                            chat: group.to_owned(),
+                            member: JONAS.to_owned(),
+                        })
+                    }
+                    _ => {}
                 }
             }
             "group-info" | "group-info-rename" | "group-info-locked" | "group-info-saving" => {
@@ -6095,6 +6174,12 @@ mod tests {
             "group-info-rename",
             "group-info-locked",
             "group-info-saving",
+            "group-admin",
+            "group-admin-menu",
+            "group-permissions",
+            "group-add-members",
+            "group-reset-link",
+            "group-remove-member",
             "forward",
             "forward-selected",
             "forward-review",
@@ -7363,6 +7448,309 @@ mod tests {
             let drawn = |id| ctx.data(|data| data.get_temp::<egui::Rect>(id)).is_some();
             assert_eq!(drawn(group_name_button_id()), offered, "{page}: the pencil");
             assert_eq!(drawn(group_photo_id()), offered, "{page}: the photo menu");
+        }
+    }
+
+    /// The panel offers each part of running a group to whoever may use it:
+    /// everything to an admin, adding and the link to members of a group
+    /// that lets them, and nothing to members of one that does not.
+    #[test]
+    fn group_management_is_offered_by_role() {
+        use crate::ui::info::{
+            add_members_row_id, invite_link_id, member_menu_id, permissions_row_id, reset_link_id,
+        };
+        for (page, permissions, add, link, reset, menus) in [
+            ("group-admin", true, true, true, true, true),
+            ("group-info", false, true, true, false, false),
+            ("group-info-locked", false, false, false, false, false),
+        ] {
+            let mut app = app();
+            let ctx = egui::Context::default();
+            app.attach(&ctx);
+            apply_flags(&mut app, Some(page));
+            if page != "group-admin" {
+                // The link the member's panel asks for, as WhatsApp answers.
+                let chat = app.open_chat.clone().unwrap();
+                app.info_invite = Some((
+                    chat,
+                    crate::group_admin::LinkState::Known(
+                        crate::group_admin::InviteLink::new(DEMO_INVITE_LINK.into()).unwrap(),
+                    ),
+                ));
+            }
+            render(&mut app, &ctx);
+            let drawn = |id| ctx.data(|data| data.get_temp::<egui::Rect>(id)).is_some();
+            assert_eq!(
+                drawn(permissions_row_id()),
+                permissions,
+                "{page}: permissions"
+            );
+            assert_eq!(drawn(add_members_row_id()), add, "{page}: add members");
+            assert_eq!(drawn(invite_link_id()), link, "{page}: the link");
+            assert_eq!(drawn(reset_link_id()), reset, "{page}: reset");
+            assert_eq!(drawn(member_menu_id(JONAS)), menus, "{page}: member menus");
+            assert!(
+                !drawn(member_menu_id(ME)),
+                "{page}: never a menu for ourselves"
+            );
+        }
+    }
+
+    /// The panel asks for the link once, and a member of a group that keeps
+    /// it for admins never asks.
+    #[test]
+    fn the_invite_link_is_asked_for_once_and_only_when_shared() {
+        use crate::backend::Command;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        apply_flags(&mut app, Some("group-admin"));
+        app.info_invite = None;
+        render(&mut app, &ctx);
+        render(&mut app, &ctx);
+        let asked = app
+            .backend
+            .take_demo_commands()
+            .into_iter()
+            .filter(|command| {
+                matches!(command, Command::GroupInviteLink { chat, reset: false } if chat == FAMILY)
+            })
+            .count();
+        assert_eq!(asked, 1);
+        assert_eq!(
+            app.info_invite,
+            Some((FAMILY.to_owned(), crate::group_admin::LinkState::Loading))
+        );
+
+        let mut app = self::app();
+        app.backend.record_demo_commands();
+        apply_flags(&mut app, Some("group-info-locked"));
+        app.attach(&ctx);
+        let chat = app.open_chat.clone().unwrap();
+        app.actions
+            .push(crate::model::Action::FetchInviteLink(chat));
+        render(&mut app, &ctx);
+        assert!(
+            !app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, Command::GroupInviteLink { .. })),
+            "the group keeps its link for admins"
+        );
+    }
+
+    /// Copy link puts the link on the clipboard and says so; Reset link asks
+    /// first, then revokes it.
+    #[test]
+    fn the_invite_link_is_copied_and_reset_from_the_panel() {
+        use crate::backend::Command;
+        use crate::ui::info::{copy_link_id, reset_link_id};
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        apply_flags(&mut app, Some("group-admin"));
+        render(&mut app, &ctx);
+        let mut copied = Vec::new();
+        let mut click =
+            |app: &mut App, id: egui::Id| {
+                let pos = ctx
+                    .data(|data| data.get_temp::<egui::Rect>(id))
+                    .expect("the control is on screen")
+                    .center();
+                let press = |pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                for events in [
+                    vec![egui::Event::PointerMoved(pos), press(true)],
+                    vec![press(false)],
+                    Vec::new(),
+                ] {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(1180.0, 780.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| {
+                            let ctx = ui.ctx().clone();
+                            app.background_frame(&ctx);
+                            app.frame_ui(ui);
+                        },
+                    );
+                    output.textures_delta.clear();
+                    copied.extend(output.platform_output.commands.into_iter().filter_map(
+                        |command| match command {
+                            egui::OutputCommand::CopyText(text) => Some(text),
+                            _ => None,
+                        },
+                    ));
+                }
+            };
+        click(&mut app, copy_link_id());
+        click(&mut app, reset_link_id());
+        assert_eq!(copied, [DEMO_INVITE_LINK]);
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message == "Invite link copied"),
+            "the copy is announced"
+        );
+        assert_eq!(
+            app.dialog,
+            Some(Dialog::ConfirmResetInviteLink(FAMILY.to_owned())),
+            "a reset asks first"
+        );
+        assert!(
+            !app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(command, Command::GroupInviteLink { reset: true, .. })),
+            "nothing is revoked before the answer"
+        );
+        app.actions
+            .push(crate::model::Action::ResetInviteLink(FAMILY.to_owned()));
+        render(&mut app, &ctx);
+        assert!(app.dialog.is_none());
+        assert!(
+            app.backend
+                .take_demo_commands()
+                .iter()
+                .any(|command| matches!(
+                    command,
+                    Command::GroupInviteLink { chat, reset: true } if chat == FAMILY
+                ))
+        );
+    }
+
+    /// Turning a permission's switch asks WhatsApp; the switch itself waits
+    /// for the answer. Every one of WhatsApp's four is there.
+    #[test]
+    fn a_permission_switch_sends_the_change() {
+        use crate::backend::Command;
+        use crate::group_admin::Permission;
+        use crate::ui::info::permission_switch_id;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        apply_flags(&mut app, Some("group-permissions"));
+        render(&mut app, &ctx);
+        for permission in Permission::ALL {
+            assert!(
+                ctx.data(|data| data.get_temp::<egui::Rect>(permission_switch_id(permission)))
+                    .is_some(),
+                "{permission:?} is drawn"
+            );
+        }
+        let pos = ctx
+            .data(|data| {
+                data.get_temp::<egui::Rect>(permission_switch_id(Permission::SendMessages))
+            })
+            .unwrap()
+            .center();
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame_with(
+            &mut app,
+            &ctx,
+            vec![egui::Event::PointerMoved(pos), press(true)],
+        );
+        frame_with(&mut app, &ctx, vec![press(false)]);
+        render(&mut app, &ctx);
+        let sent = app.backend.take_demo_commands();
+        assert!(
+            sent.iter().any(|command| matches!(
+                command,
+                Command::SetGroupPermission {
+                    chat,
+                    permission: Permission::SendMessages,
+                    members: false,
+                } if chat == FAMILY
+            )),
+            "only admins may send now: {sent:?}"
+        );
+        assert_eq!(
+            Permission::SendMessages.value(app.chat(FAMILY).unwrap()),
+            Some(true),
+            "nothing changes before WhatsApp accepts it"
+        );
+    }
+
+    /// Add members offers only people outside the group, and Add sends the
+    /// picked ones.
+    #[test]
+    fn add_members_offers_outsiders_and_sends_the_picked() {
+        use crate::backend::Command;
+        use crate::ui::new_group::member_row_id;
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        apply_flags(&mut app, Some("group-add-members"));
+        render(&mut app, &ctx);
+        let drawn = |id: &str| {
+            ctx.data(|data| data.get_temp::<egui::Rect>(member_row_id(id)))
+                .is_some()
+        };
+        assert!(drawn(DOROTHY), "someone outside the group");
+        assert!(!drawn(JONAS), "a member is not offered");
+        app.actions.push(crate::model::Action::AddGroupMembers);
+        render(&mut app, &ctx);
+        assert!(app.backend.take_demo_commands().iter().any(|command| matches!(
+            command,
+            Command::AddGroupMembers { chat, members } if chat == FAMILY && members == &[DOROTHY.to_owned()]
+        )));
+        assert!(app.new_group.as_ref().is_some_and(|draft| draft.creating));
+    }
+
+    /// The member menu offers what the member may be made: Mira is an admin,
+    /// Jonas is not. Remove asks first.
+    #[test]
+    fn the_member_menu_follows_each_members_role() {
+        use crate::group_admin::{MemberChange, member_changes};
+        fn texts(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
+                _ => {}
+            }
+        }
+        let mut app = app();
+        apply_flags(&mut app, Some("group-admin-menu"));
+        let chat = app.chat(FAMILY).unwrap().clone();
+        let mira = "491702222222@s.whatsapp.net";
+        assert_eq!(
+            member_changes(&chat, JONAS, &[ME]),
+            [MemberChange::Promote, MemberChange::Remove]
+        );
+        assert_eq!(
+            member_changes(&chat, mira, &[ME]),
+            [MemberChange::Demote, MemberChange::Remove]
+        );
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let shapes = (0..3)
+            .map(|_| frame_sized(&mut app, &ctx, 780.0, Vec::new()))
+            .last()
+            .unwrap();
+        let mut drawn = Vec::new();
+        for clipped in &shapes {
+            texts(&clipped.shape, &mut drawn);
+        }
+        for label in ["Make group admin", "Remove from group", "Group admin"] {
+            assert!(drawn.iter().any(|text| text == label), "{label}: {drawn:?}");
         }
     }
 

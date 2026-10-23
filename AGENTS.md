@@ -444,6 +444,29 @@ protocol. These notes are for coding agents and new contributors.
   people picked but missing are reported by name. `group_created` files the
   chat named, with its members and our admin rights, before
   `Event::GroupCreated` opens it.
+- Group management lives in the info panel (`src/group_admin.rs`, the worker's
+  `backend/worker/group_admin.rs`). The metadata's permissions and admins are
+  filed as `chats.group_settings` (JSON, NULL until known; `Chat::group_settings`),
+  read by `settings_of`: only an explicit `all_member_add`/`all_member_link`
+  lets members add people or see the link, WhatsApp's default being admins
+  only. `Chat::can_add_members`, `can_share_invite_link` and `can_manage_group`
+  gate the panel's Add members, Invite via link, Group permissions (an
+  `InfoView::Permissions` page: `set_locked`, `set_announce`,
+  `set_member_add_mode`, `set_membership_approval`) and each member's menu
+  (`promote_participants`, `demote_participants`, `remove_participants`);
+  the worker checks the same rights again. Add members is New group's
+  `Draft` made with `Draft::adding` (the choosing step alone, without the
+  group's members), sent with `add_participants`, whose per-person error
+  codes name who was refused and why (403 privacy, 408 recently left; 409,
+  already in, counts as added). Each answer returns as
+  `Command::GroupManaged`; `group_managed` files only what WhatsApp accepted
+  and bumps `settings_generation`, so metadata asked for earlier (the library
+  joins a query in flight) cannot undo it, and a refusal re-asks the
+  metadata. The invite link (`groups().get_invite_link`, `reset` revokes it)
+  is a secret: `group_admin::InviteLink` hides it from `Debug`, it is never
+  logged or stored, and the window keeps it only while the panel shows its
+  group (`App::info_invite`). The library has no simple way to send an
+  invite message, so people WhatsApp refuses are named and pointed to the link.
 - Mentioning everyone uses the visible body token `@all` and bit 1 of
   `ContextInfo.non_jid_mentions` (`src/mentions.rs`). Localized words
   (`@todos` in Portuguese, and the one-word alias of each other language)

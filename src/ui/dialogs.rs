@@ -51,6 +51,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     420.0_f32.min((ui.ctx().content_rect().width() - 64.0).max(180.0))
                 }
                 Dialog::Labels => 460.0,
+                Dialog::AddGroupMembers(_) => 420.0,
+                Dialog::ConfirmResetInviteLink(_) | Dialog::ConfirmRemoveMember { .. } => 380.0,
             });
             ui.spacing_mut().item_spacing.y = 8.0;
             match dialog {
@@ -100,6 +102,17 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::StickerMaker => sticker_maker(app, ui),
                 Dialog::MessageInfo { chat, message } => {
                     super::message_info::show(app, ui, &chat, &message)
+                }
+                Dialog::AddGroupMembers(_) => {
+                    if app.new_group.is_some() {
+                        super::new_group::show(app, ui);
+                    } else {
+                        app.actions.push(Action::CloseDialog);
+                    }
+                }
+                Dialog::ConfirmResetInviteLink(chat) => confirm_reset_invite_link(app, ui, &chat),
+                Dialog::ConfirmRemoveMember { chat, member } => {
+                    confirm_remove_member(app, ui, &chat, &member)
                 }
             }
         });
@@ -1450,6 +1463,88 @@ fn confirm_destructive(
                 app.actions.push(Action::CloseDialog);
             }
             if theme::pill_button(ui, &palette, &cancel, false).clicked() {
+                app.actions.push(Action::CloseDialog);
+            }
+        });
+    });
+}
+
+/// Asks before revoking a group's invite link: everyone holding the old
+/// one loses the way in.
+fn confirm_reset_invite_link(app: &mut App, ui: &mut egui::Ui, chat: &str) {
+    let palette = app.palette;
+    let locale = app.locale;
+    title(
+        ui,
+        app,
+        crate::i18n::gettext(locale, "Reset the invite link?").as_ref(),
+    );
+    theme::paragraph(
+        ui,
+        crate::i18n::gettext(
+            locale,
+            "The current link will stop working, and nobody can join with it any more. A new link replaces it.",
+        ),
+        theme::regular(13.5),
+        palette.text,
+    );
+    ui.add_space(10.0);
+    confirm_buttons(
+        app,
+        ui,
+        crate::i18n::gettext(locale, "Reset link").as_ref(),
+        Action::ResetInviteLink(chat.to_owned()),
+    );
+}
+
+/// Asks before removing someone from a group.
+fn confirm_remove_member(app: &mut App, ui: &mut egui::Ui, chat: &str, member: &str) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let name = app.display_name(member);
+    let group = app
+        .chat(chat)
+        .map(|chat| app.chat_title(chat))
+        .unwrap_or_default();
+    title(
+        ui,
+        app,
+        crate::i18n::gettext(locale, "Remove from the group?").as_ref(),
+    );
+    theme::paragraph(
+        ui,
+        crate::i18n::gettext(
+            locale,
+            "{name} will no longer receive messages from {group}. You can add them again later.",
+        )
+        .replace("{name}", &name)
+        .replace("{group}", &group),
+        theme::regular(13.5),
+        palette.text,
+    );
+    ui.add_space(10.0);
+    confirm_buttons(
+        app,
+        ui,
+        crate::i18n::gettext(locale, "Remove").as_ref(),
+        Action::ChangeGroupMember {
+            chat: chat.to_owned(),
+            member: member.to_owned(),
+            change: crate::group_admin::MemberChange::Remove,
+        },
+    );
+}
+
+/// A destructive button and Cancel, at the right.
+fn confirm_buttons(app: &mut App, ui: &mut egui::Ui, label: &str, action: Action) {
+    let palette = app.palette;
+    let cancel = crate::i18n::gettext(app.locale, "Cancel");
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if danger_button(ui, app, label).clicked() {
+                app.actions.push(action);
+            }
+            if theme::pill_button(ui, &palette, cancel.as_ref(), false).clicked() {
                 app.actions.push(Action::CloseDialog);
             }
         });

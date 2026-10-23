@@ -1,4 +1,5 @@
 //! New chat's New group steps: choosing the members, then naming the group.
+//! The group info panel's Add members dialog is the choosing step alone.
 //!
 //! The draft lives in `Account::new_group`; this view edits only its name
 //! and the dialog's search, and pushes `Action`s for everything else.
@@ -59,7 +60,16 @@ fn header(app: &mut App, ui: &mut egui::Ui, label: &str) {
 
 fn choosing(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let heading = crate::i18n::gettext(app.locale, "Add group members");
+    let adding = app
+        .new_group
+        .as_ref()
+        .is_some_and(|draft| draft.adding.is_some());
+    let busy = app.new_group.as_ref().is_some_and(|draft| draft.creating);
+    let heading = if adding {
+        crate::i18n::gettext(app.locale, "Add members")
+    } else {
+        crate::i18n::gettext(app.locale, "Add group members")
+    };
     header(app, ui, &heading);
     let members = app
         .new_group
@@ -85,7 +95,11 @@ fn choosing(app: &mut App, ui: &mut egui::Ui) {
     }
     ui.add_space(4.0);
     let needle = crate::util::search_key(app.new_chat_search.trim());
-    let contacts = super::dialogs::contact_choices(app, &needle);
+    let mut contacts = super::dialogs::contact_choices(app, &needle);
+    if let Some(draft) = app.new_group.as_ref() {
+        // Adding offers only people outside the group.
+        contacts.retain(|contact| draft.offers(&contact.id));
+    }
     let max_height = (ui.ctx().content_rect().height() - 300.0).clamp(ROW_HEIGHT * 3.0, 420.0);
     egui::ScrollArea::vertical()
         .id_salt("new-group-contacts")
@@ -107,11 +121,17 @@ fn choosing(app: &mut App, ui: &mut egui::Ui) {
         );
     }
     ui.add_space(8.0);
-    let ready = app
-        .new_group
-        .as_ref()
-        .is_some_and(crate::new_group::Draft::can_advance);
+    let ready = app.new_group.as_ref().is_some_and(|draft| {
+        if adding {
+            draft.can_add()
+        } else {
+            draft.can_advance()
+        }
+    });
     ui.horizontal(|ui| {
+        if busy {
+            theme::spinner(ui, 16.0, palette.accent);
+        }
         theme::text(
             ui,
             crate::i18n::ngettext(
@@ -125,16 +145,24 @@ fn choosing(app: &mut App, ui: &mut egui::Ui) {
             palette.secondary,
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let next = crate::i18n::gettext(app.locale, "Next");
+            let next = if adding {
+                crate::i18n::pgettext(app.locale, "add group members", "Add")
+            } else {
+                crate::i18n::gettext(app.locale, "Next")
+            };
             let pick = crate::i18n::gettext(app.locale, "Choose at least one person");
-            if ui
+            let clicked = ui
                 .add_enabled_ui(ready, |ui| {
                     theme::pill_button(ui, &palette, &next, true).on_disabled_hover_text(pick)
                 })
                 .inner
-                .clicked()
-            {
-                app.actions.push(Action::NewGroupNext);
+                .clicked();
+            if clicked && ready {
+                app.actions.push(if adding {
+                    Action::AddGroupMembers
+                } else {
+                    Action::NewGroupNext
+                });
             }
         });
     });

@@ -45,6 +45,7 @@ mod device_store;
 mod early_events;
 use early_events::WaitingReaction;
 mod favorite_chats;
+mod group_admin;
 mod interactive;
 mod link_watch;
 mod new_group;
@@ -755,6 +756,7 @@ pub async fn run(
         group_info_requested: HashSet::new(),
         leave_generation: HashMap::new(),
         subject_generation: HashMap::new(),
+        settings_generation: HashMap::new(),
         group_pictures_sent: HashMap::new(),
         description_generation: HashMap::new(),
         group_info_generation: HashMap::new(),
@@ -1166,6 +1168,10 @@ struct Worker {
     /// Bumped whenever a rename made here is confirmed, for the same reason:
     /// metadata asked for before it must not bring the old subject back.
     subject_generation: HashMap<String, u64>,
+    /// Bumped whenever a permission or member change made here is accepted:
+    /// metadata asked for before it (the library joins a query already in
+    /// flight) must not bring the old permissions or members back.
+    settings_generation: HashMap<String, u64>,
     /// The photo each group was last sent, kept until WhatsApp answers so an
     /// accepted one shows at once rather than after a lookup the server may
     /// still answer with the old picture.
@@ -3108,6 +3114,8 @@ impl Worker {
                     // edit a group's info; a group we left has nothing to ask.
                     && (chat.info_locked.is_some() || chat.left)
                     && (chat.group_description.is_some() || chat.left)
+                    // Nor its permissions and admins, before group management.
+                    && (chat.group_settings.is_some() || chat.left)
             });
             if known {
                 return;
@@ -3202,6 +3210,7 @@ impl Worker {
         // Likewise after a rename made here, which the answer may predate.
         let subject_generation = self.subject_generation.get(id).copied().unwrap_or(0);
         let description_generation = self.description_generation.get(id).copied().unwrap_or(0);
+        let settings_generation = self.settings_generation.get(id).copied().unwrap_or(0);
         let me: Vec<String> = [self.me_pn.clone(), self.me_lid.clone()]
             .into_iter()
             .flatten()
@@ -3212,6 +3221,7 @@ impl Worker {
                 Ok(metadata) => {
                     let (participants, admin) =
                         new_group::group_members(&metadata.participants, &me, &lids);
+                    let settings = group_admin::settings_of(&metadata, &lids);
                     let _ = commands.send(Command::GroupInfo {
                         leave_generation,
                         chat,
@@ -3237,6 +3247,8 @@ impl Worker {
                         info_locked: metadata.is_locked,
                         admin,
                         subject_generation,
+                        settings,
+                        settings_generation,
                     });
                 }
                 Err(error) => {
@@ -6603,6 +6615,19 @@ impl Worker {
                 });
             }
             Command::SetGroupName { chat, name } => self.set_group_name(chat, name),
+            Command::GroupInviteLink { chat, reset } => self.group_invite_link(chat, reset),
+            Command::AddGroupMembers { chat, members } => self.add_group_members(chat, members),
+            Command::SetGroupPermission {
+                chat,
+                permission,
+                members,
+            } => self.set_group_permission(chat, permission, members),
+            Command::ChangeGroupMember {
+                chat,
+                member,
+                change,
+            } => self.change_group_member(chat, member, change),
+            Command::GroupManaged { chat, answer } => self.group_managed(chat, answer),
             Command::PickGroupPicture(chat) => {
                 if !self.may_edit_group(&chat) {
                     return;
@@ -7731,6 +7756,8 @@ impl Worker {
                 info_locked,
                 admin,
                 subject_generation,
+                settings,
+                settings_generation,
             } => {
                 if request_generation != self.group_info_generation.get(&chat).copied().unwrap_or(0)
                 {
@@ -7747,10 +7774,27 @@ impl Worker {
                     self.group_info_tries.remove(&chat);
                     self.group_info_retry.retain(|(_, id)| id != &chat);
                 }
+                // A snapshot asked for before a permission or member change
+                // made here was accepted may predate it: keep what we filed.
+                let current = settings_generation
+                    >= self.settings_generation.get(&chat).copied().unwrap_or(0);
+                let participants = if current {
+                    participants
+                } else {
+                    self.archive
+                        .chat(&chat)
+                        .ok()
+                        .flatten()
+                        .map(|row| row.participants)
+                        .unwrap_or(participants)
+                };
                 let _ =
                     self.archive
                         .set_group_info(&chat, name.as_deref(), &participants, read_only);
-                let _ = self.archive.set_group_rights(&chat, info_locked, admin);
+                if current {
+                    let _ = self.archive.set_group_rights(&chat, info_locked, admin);
+                    let _ = self.archive.set_group_settings(&chat, &settings);
+                }
                 if description_generation
                     >= self.description_generation.get(&chat).copied().unwrap_or(0)
                 {
@@ -15667,6 +15711,8 @@ mod receipt_tests {
                 info_locked: false,
                 admin: false,
                 subject_generation: 0,
+                settings: Default::default(),
+                settings_generation: 0,
             })
             .await;
         assert_eq!(
@@ -15694,6 +15740,8 @@ mod receipt_tests {
                 info_locked: false,
                 admin: false,
                 subject_generation: 0,
+                settings: Default::default(),
+                settings_generation: 0,
             })
             .await;
         assert_eq!(
@@ -15728,6 +15776,8 @@ mod receipt_tests {
                 info_locked: false,
                 admin: false,
                 subject_generation: 0,
+                settings: Default::default(),
+                settings_generation: 0,
             })
             .await;
         assert!(
@@ -15751,6 +15801,8 @@ mod receipt_tests {
                 info_locked: false,
                 admin: false,
                 subject_generation: 0,
+                settings: Default::default(),
+                settings_generation: 0,
             })
             .await;
         assert!(
@@ -15810,6 +15862,8 @@ mod receipt_tests {
                 info_locked: true,
                 admin: true,
                 subject_generation: 0,
+                settings: Default::default(),
+                settings_generation: 0,
             })
             .await;
         let row = worker.archive.chat(chat).unwrap().unwrap();
@@ -15974,6 +16028,8 @@ mod receipt_tests {
                     info_locked: false,
                     admin: false,
                     subject_generation: 0,
+                    settings: Default::default(),
+                    settings_generation: 0,
                 })
                 .await;
             assert!(events.try_iter().any(|event| matches!(event,
@@ -16067,6 +16123,8 @@ mod receipt_tests {
                 info_locked: false,
                 admin: false,
                 subject_generation: 0,
+                settings: Default::default(),
+                settings_generation: 0,
             })
             .await;
         assert_eq!(
@@ -16134,6 +16192,8 @@ mod receipt_tests {
                 info_locked: false,
                 admin: false,
                 subject_generation: 0,
+                settings: Default::default(),
+                settings_generation: 0,
             };
             worker.request_group_info(group, true);
             let older = snapshot(
@@ -16326,6 +16386,8 @@ mod receipt_tests {
             info_locked: false,
             admin: false,
             subject_generation,
+            settings: Default::default(),
+            settings_generation: 0,
         };
         worker
             .handle_command(Command::GroupEdited {
@@ -16911,6 +16973,7 @@ mod receipt_tests {
             group_info_requested: HashSet::new(),
             leave_generation: HashMap::new(),
             subject_generation: HashMap::new(),
+            settings_generation: HashMap::new(),
             group_pictures_sent: HashMap::new(),
             description_generation: HashMap::new(),
             group_info_generation: HashMap::new(),

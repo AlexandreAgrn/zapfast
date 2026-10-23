@@ -4,6 +4,10 @@
 //! The dialog draws from [`Draft`] and pushes `Action`s; `App` applies them
 //! here, sends `Command::CreateGroup`, and opens the group once the worker
 //! answers with `Event::GroupCreated`.
+//!
+//! The same draft, made with [`Draft::adding`], is the group info panel's
+//! Add members dialog: only the choosing step, without the group's members,
+//! sent as `Command::AddGroupMembers`.
 
 use std::path::PathBuf;
 
@@ -32,6 +36,10 @@ pub struct Draft {
     pub picture: Option<PathBuf>,
     /// Whether the group was asked for and WhatsApp has not answered yet.
     pub creating: bool,
+    /// The group people are being added to, in the Add members dialog.
+    pub adding: Option<ChatId>,
+    /// Who is already in that group, and so not offered.
+    pub existing: Vec<ChatId>,
 }
 
 /// What a step of the dialog leads to.
@@ -44,15 +52,31 @@ pub enum Step {
 }
 
 impl Draft {
+    /// The Add members dialog for `chat`, whose `existing` members are not
+    /// offered.
+    pub fn adding(chat: ChatId, existing: Vec<ChatId>) -> Self {
+        Self {
+            adding: Some(chat),
+            existing,
+            ..Self::default()
+        }
+    }
+
+    /// Whether `id` may be offered: anyone not already in the group.
+    pub fn offers(&self, id: &str) -> bool {
+        !self.existing.iter().any(|member| member == id)
+    }
+
     /// Picks someone, or lets them go. Letting the last one go while
-    /// choosing returns to the plain list, as unchecking everyone should.
+    /// choosing returns to the plain list, as unchecking everyone should;
+    /// the Add members dialog has no plain list and stays.
     pub fn toggle(&mut self, id: &str) -> Step {
-        if self.creating {
+        if self.creating || !self.offers(id) {
             return Step::Stay;
         }
         if let Some(index) = self.members.iter().position(|member| member == id) {
             self.members.remove(index);
-            if self.members.is_empty() {
+            if self.members.is_empty() && self.adding.is_none() {
                 return Step::Leave;
             }
         } else {
@@ -65,9 +89,14 @@ impl Draft {
         self.members.iter().any(|member| member == id)
     }
 
-    /// Next is offered once someone is picked.
+    /// Next is offered once someone is picked. Adding has no next step.
     pub fn can_advance(&self) -> bool {
-        self.stage == Stage::Choosing && !self.members.is_empty()
+        self.adding.is_none() && self.stage == Stage::Choosing && !self.members.is_empty()
+    }
+
+    /// Whether Add is offered in the Add members dialog.
+    pub fn can_add(&self) -> bool {
+        self.adding.is_some() && !self.creating && !self.members.is_empty()
     }
 
     pub fn advance(&mut self) {
@@ -81,6 +110,9 @@ impl Draft {
     pub fn back(&mut self) -> Step {
         if self.creating {
             return Step::Stay;
+        }
+        if self.adding.is_some() {
+            return Step::Leave;
         }
         match self.stage {
             Stage::Naming => {
@@ -292,6 +324,31 @@ mod tests {
         assert_eq!(draft.stage, Stage::Naming);
         assert_eq!(draft.toggle("1@s.whatsapp.net"), Step::Stay);
         assert_eq!(draft.members.len(), 1);
+    }
+
+    #[test]
+    fn adding_offers_only_people_outside_the_group_and_has_one_step() {
+        let mut draft = Draft::adding(
+            "120363000000000001@g.us".into(),
+            vec!["1@s.whatsapp.net".into()],
+        );
+        assert!(!draft.offers("1@s.whatsapp.net"), "already a member");
+        assert_eq!(draft.toggle("1@s.whatsapp.net"), Step::Stay);
+        assert!(draft.members.is_empty(), "and cannot be picked");
+        assert!(!draft.can_add(), "Add waits for someone");
+        assert_eq!(draft.toggle("2@s.whatsapp.net"), Step::Stay);
+        assert!(draft.can_add());
+        assert!(!draft.can_advance(), "there is no naming step");
+        draft.advance();
+        assert_eq!(draft.stage, Stage::Choosing);
+        assert_eq!(
+            draft.toggle("2@s.whatsapp.net"),
+            Step::Stay,
+            "unchecking everyone keeps the dialog"
+        );
+        assert_eq!(draft.back(), Step::Leave, "Back closes it");
+        draft.creating = true;
+        assert!(!draft.can_add());
     }
 
     #[test]

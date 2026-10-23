@@ -97,6 +97,11 @@ impl Worker {
                         }
                     };
                     let (participants, admin) = group_members(&metadata.participants, &me, &lids);
+                    let mut settings = super::group_admin::settings_of(&metadata, &lids);
+                    if !confirmed {
+                        // The creator is an admin whatever the answer says.
+                        settings.admins.extend(me.iter().cloned());
+                    }
                     let unadded = if confirmed {
                         crate::new_group::unadded(&picked, &participants)
                     } else {
@@ -114,6 +119,7 @@ impl Worker {
                         admin: admin || !confirmed,
                         info_locked: metadata.is_locked,
                         read_only: metadata.is_announcement && !admin,
+                        settings,
                         created_at: metadata
                             .creation_time
                             .and_then(|at| i64::try_from(at).ok())
@@ -169,6 +175,7 @@ impl Worker {
         let _ = self
             .archive
             .set_group_rights(&chat, group.info_locked, group.admin);
+        let _ = self.archive.set_group_settings(&chat, &group.settings);
         let _ = self.archive.set_group_description(&chat, "");
         let _ = self.archive.touch_activity(&chat, group.created_at);
         self.emit_chat(&chat);
@@ -188,7 +195,7 @@ impl Worker {
     }
 
     /// A member id as the archive files it.
-    fn canonical_id(&self, id: &str) -> ChatId {
+    pub(super) fn canonical_id(&self, id: &str) -> ChatId {
         match Self::jid_of(id) {
             Some(jid) => canonical_jid(&jid, &self.lid_to_pn),
             None => id.to_owned(),
@@ -198,7 +205,7 @@ impl Worker {
 
 /// A JID under its canonical chat id: a privacy id under its phone number
 /// once the mapping is known.
-fn canonical_jid(jid: &Jid, lids: &HashMap<String, String>) -> String {
+pub(super) fn canonical_jid(jid: &Jid, lids: &HashMap<String, String>) -> String {
     if jid.is_lid()
         && let Some(pn) = lids.get(jid.user_base())
     {
@@ -342,6 +349,7 @@ mod tests {
                     admin: true,
                     info_locked: false,
                     read_only: false,
+                    settings: Default::default(),
                     created_at: 1_700_000_000,
                     unadded: vec![grace.into()],
                 }),

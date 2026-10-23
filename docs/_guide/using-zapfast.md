@@ -586,8 +586,8 @@ characters), optionally choose **Add group photo** (cropped to a centred
 square, as the group details' photo is), and choose **Create**. You are the
 group's admin, and the new group opens straight away. Some people's privacy
 settings only let certain contacts add them to groups: when WhatsApp does not
-add someone, ZapFast names them after the group is created, and you can invite
-them from your phone. **Back** steps back, unchecking everyone returns to the
+add someone, ZapFast names them after the group is created, and you can send
+them the group's invite link from its details. **Back** steps back, unchecking everyone returns to the
 contact list, and Escape closes the dialog.
 
 The search bar finds chats by name, number, or latest message; searches all
@@ -669,6 +669,32 @@ chat's actions. When WhatsApp lets you edit a group's info, rename it with the
 pencil beside its name and click its photo to change it. Clicking a
 `chat.whatsapp.com` invite link shows the group and joins it without leaving
 ZapFast.
+
+The details of a group you run (as one of its admins) also let you manage it,
+as WhatsApp's own apps do:
+
+- **Invite via link** shows the group's `https://chat.whatsapp.com/` link.
+  **Copy link** puts it on the clipboard to paste wherever you like, for
+  example to gather friends for a call. **Reset link** asks first, then turns
+  the old link off and makes a new one: anyone holding the old link can no
+  longer join with it. Anyone with the link can join, so share it only with
+  people you would add yourself.
+- **Add members** opens the same list as **New group**, without the people
+  already in it: check the ones to add and choose **Add**. When someone's
+  privacy settings do not let you add them, or they left the group recently,
+  ZapFast names them; send them the invite link instead.
+- **Group permissions** has WhatsApp's switches: whether members (not only
+  admins) may edit the group's settings, send messages and add other members,
+  and whether admins approve new members before they join. A switch moves
+  once WhatsApp accepts the change. Requests to join wait on your phone.
+- Each member's row has a **…** menu (also on right-click): **Make group
+  admin**, **Dismiss as admin**, and **Remove from group**, which asks first.
+  Admins are tagged **Group admin**. The group's creator cannot be dismissed
+  or removed.
+
+Members who are not admins see **Add members** and **Invite via link** only
+when the group lets every member add people or share its link. ZapFast keeps
+the link only while the details are open, never on disk.
 
 **Media, links and docs** in the panel lists the photos and videos, the
 documents, and the links shared in the chat, newest first: click a photo or a

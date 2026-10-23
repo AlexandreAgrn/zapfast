@@ -479,6 +479,9 @@ pub struct App {
     /// The shown group's members in display order, sorted once per change
     /// rather than every frame.
     pub(crate) info_members: Option<(ChatId, Vec<(String, String)>)>,
+    /// The shown group's invite link, asked for when its row is drawn and
+    /// dropped with the panel: it is a secret, never kept longer.
+    pub info_invite: Option<(ChatId, crate::group_admin::LinkState)>,
     /// The panel control that takes the keyboard on the next frame.
     pub(crate) info_focus: Option<InfoFocus>,
     /// Whether the locked-chats folder is open.
@@ -535,6 +538,9 @@ pub struct App {
     /// Demo/test: keep the open chat's header menu open.
     #[cfg(any(test, feature = "demo"))]
     pub open_header_menu: Option<ChatId>,
+    /// Demo/test: keep this group member's menu open in the info panel.
+    #[cfg(any(test, feature = "demo"))]
+    pub open_member_menu: Option<ChatId>,
     /// Demo/test: keep the selection bar's delete menu open.
     #[cfg(any(test, feature = "demo"))]
     pub open_selection_delete_menu: bool,
@@ -1333,6 +1339,7 @@ impl App {
             info_media_request: 0,
             info_media_failed: false,
             info_members: None,
+            info_invite: None,
             info_focus: None,
             chat_search: String::new(),
             chat_search_hits: Vec::new(),
@@ -1372,6 +1379,8 @@ impl App {
             open_chat_menu: None,
             #[cfg(any(test, feature = "demo"))]
             open_header_menu: None,
+            #[cfg(any(test, feature = "demo"))]
+            open_member_menu: None,
             #[cfg(any(test, feature = "demo"))]
             open_selection_delete_menu: false,
             emoji_jump: None,
@@ -3911,6 +3920,43 @@ impl App {
                 Err(_) => {}
             },
             Event::GroupCreated { request, result } => self.group_created(request, result, live),
+            Event::GroupInviteLink {
+                chat,
+                reset,
+                result,
+            } => self.group_invite_link(chat, reset, result, live),
+            Event::GroupMembersAdded { chat, result } => {
+                self.group_members_added(chat, result, live)
+            }
+            Event::GroupPermissionSaved { result, .. } => {
+                if let Err(failure) = result
+                    && live
+                {
+                    let said = failure.message(self.locale);
+                    self.toast_error(said);
+                }
+            }
+            Event::GroupMemberChanged {
+                member,
+                change,
+                result,
+                ..
+            } => {
+                if live {
+                    match result {
+                        Ok(()) => {
+                            let name = self.display_name(&member);
+                            let said =
+                                crate::group_admin::changed_message(self.locale, change, &name);
+                            self.toast(said);
+                        }
+                        Err(failure) => {
+                            let said = failure.message(self.locale);
+                            self.toast_error(said);
+                        }
+                    }
+                }
+            }
             Event::ContactFailed { request, error } => {
                 if self.new_contact_request == Some(request) {
                     self.new_contact_request = None;
@@ -4521,6 +4567,7 @@ impl App {
             // when this chat cannot be asked for yet.
             self.reset_info_media();
             self.info_members = None;
+            self.info_invite = None;
             self.info = Some(InfoPanel {
                 chat,
                 view: InfoView::Overview,
@@ -4550,6 +4597,7 @@ impl App {
         self.info = None;
         self.reset_info_media();
         self.info_members = None;
+        self.info_invite = None;
         self.info_focus = None;
         self.contact_edit = None;
         self.group_name_edit = None;
@@ -7669,6 +7717,17 @@ impl App {
                     self.new_chat_search.clear();
                     self.new_group = None;
                 }
+                if let Dialog::AddGroupMembers(chat) = &dialog {
+                    let Some(existing) = self
+                        .chat(chat)
+                        .filter(|chat| chat.can_add_members())
+                        .map(|chat| chat.participants.clone())
+                    else {
+                        return;
+                    };
+                    self.new_chat_search.clear();
+                    self.new_group = Some(crate::new_group::Draft::adding(chat.clone(), existing));
+                }
                 self.emoji_start = None;
                 self.mention_start = None;
                 if matches!(&dialog, Dialog::CreatePoll(_)) && !self.poll_creating {
@@ -7998,7 +8057,9 @@ impl App {
                     // The keyboard follows the view: Back after the media row
                     // opened the media view, the row after Back closed it.
                     self.info_focus = match (info.view, view) {
-                        (InfoView::Overview, InfoView::Media(_)) => Some(InfoFocus::Back),
+                        (InfoView::Overview, InfoView::Media(_) | InfoView::Permissions) => {
+                            Some(InfoFocus::Back)
+                        }
                         (InfoView::Media(_), InfoView::Overview) => Some(InfoFocus::MediaRow),
                         _ => None,
                     };
@@ -8220,12 +8281,20 @@ impl App {
                 }
             }
             Action::NewGroupBack => {
+                let adding = self
+                    .new_group
+                    .as_ref()
+                    .is_some_and(|draft| draft.adding.is_some());
                 if self
                     .new_group
                     .as_mut()
                     .is_some_and(|draft| draft.back() == crate::new_group::Step::Leave)
                 {
                     self.new_group = None;
+                    // Add members has no plain list to step back to.
+                    if adding {
+                        self.actions.push(Action::CloseDialog);
+                    }
                 }
             }
             Action::PickNewGroupPicture => {
@@ -8239,6 +8308,78 @@ impl App {
                 }
             }
             Action::CreateGroup => self.create_group(),
+            Action::FetchInviteLink(chat) => {
+                let asked = self.info_invite.as_ref().is_some_and(|(shown, state)| {
+                    shown == &chat && !matches!(state, crate::group_admin::LinkState::Failed(_))
+                });
+                if !asked && self.chat(&chat).is_some_and(Chat::can_share_invite_link) {
+                    self.info_invite = Some((chat.clone(), crate::group_admin::LinkState::Loading));
+                    self.backend
+                        .send(Command::GroupInviteLink { chat, reset: false });
+                }
+            }
+            Action::CopyInviteLink(chat) => {
+                if let Some((_, crate::group_admin::LinkState::Known(link))) = self
+                    .info_invite
+                    .as_ref()
+                    .filter(|(shown, _)| shown == &chat)
+                {
+                    ctx.copy_text(link.as_str().to_owned());
+                    let said = crate::i18n::gettext(self.locale, "Invite link copied");
+                    self.toast(said.into_owned());
+                }
+            }
+            Action::ResetInviteLink(chat) => {
+                if self.dialog == Some(Dialog::ConfirmResetInviteLink(chat.clone())) {
+                    self.dialog = None;
+                }
+                if self.chat(&chat).is_some_and(Chat::can_manage_group) {
+                    self.info_invite = Some((chat.clone(), crate::group_admin::LinkState::Loading));
+                    self.backend
+                        .send(Command::GroupInviteLink { chat, reset: true });
+                }
+            }
+            Action::AddGroupMembers => {
+                let Some(draft) = self.new_group.as_mut().filter(|draft| draft.can_add()) else {
+                    return;
+                };
+                let Some(chat) = draft.adding.clone() else {
+                    return;
+                };
+                draft.creating = true;
+                let members = draft.members.clone();
+                self.backend
+                    .send(Command::AddGroupMembers { chat, members });
+            }
+            Action::SetGroupPermission {
+                chat,
+                permission,
+                members,
+            } => {
+                if self.chat(&chat).is_some_and(Chat::can_manage_group) {
+                    self.backend.send(Command::SetGroupPermission {
+                        chat,
+                        permission,
+                        members,
+                    });
+                }
+            }
+            Action::ChangeGroupMember {
+                chat,
+                member,
+                change,
+            } => {
+                if matches!(&self.dialog, Some(Dialog::ConfirmRemoveMember { .. })) {
+                    self.dialog = None;
+                }
+                if self.chat(&chat).is_some_and(Chat::can_manage_group) {
+                    self.backend.send(Command::ChangeGroupMember {
+                        chat,
+                        member,
+                        change,
+                    });
+                }
+            }
             Action::PickGroupPicture(chat) => self.backend.send(Command::PickGroupPicture(chat)),
             Action::RemoveGroupPicture(chat) => {
                 self.backend
@@ -8526,6 +8667,101 @@ impl App {
             }
             Err(failure) => {
                 if let Some(draft) = self.new_group.as_mut() {
+                    draft.creating = false;
+                }
+                if live {
+                    let said = failure.message(self.locale);
+                    self.toast_error(said);
+                }
+            }
+        }
+    }
+
+    /// WhatsApp answered for a group's invite link: the panel's row shows
+    /// it, and a reset says so.
+    fn group_invite_link(
+        &mut self,
+        chat: ChatId,
+        reset: bool,
+        result: Result<crate::group_admin::InviteLink, crate::group_admin::Failure>,
+        live: bool,
+    ) {
+        use crate::group_admin::LinkState;
+        // The panel is the window's: another account's answer is not for it.
+        if !live
+            || self
+                .info_invite
+                .as_ref()
+                .is_none_or(|(shown, _)| shown != &chat)
+        {
+            return;
+        }
+        match result {
+            Ok(link) => {
+                self.info_invite = Some((chat, LinkState::Known(link)));
+                if reset {
+                    let said = crate::i18n::gettext(
+                        self.locale,
+                        "The old link no longer works. Here is a new one.",
+                    );
+                    self.toast(said.into_owned());
+                }
+            }
+            Err(failure) => {
+                self.info_invite = Some((chat, LinkState::Failed(failure)));
+                if reset {
+                    let said = failure.message(self.locale);
+                    self.toast_error(said);
+                }
+            }
+        }
+    }
+
+    /// WhatsApp answered Add members: the dialog closes, and the toasts say
+    /// who joined and who could not be added, by name.
+    fn group_members_added(
+        &mut self,
+        chat: ChatId,
+        result: Result<crate::group_admin::Added, crate::group_admin::Failure>,
+        live: bool,
+    ) {
+        let waiting = self
+            .new_group
+            .as_ref()
+            .is_some_and(|draft| draft.adding.as_deref() == Some(chat.as_str()));
+        match result {
+            Ok(added) => {
+                if waiting {
+                    self.new_group = None;
+                    if self.dialog == Some(Dialog::AddGroupMembers(chat.clone())) {
+                        self.dialog = None;
+                    }
+                }
+                if !live {
+                    return;
+                }
+                if !added.added.is_empty() {
+                    let count = added.added.len();
+                    let said = crate::i18n::ngettext(
+                        self.locale,
+                        "{count} person added to the group",
+                        "{count} people added to the group",
+                        count as u32,
+                    )
+                    .replace("{count}", &count.to_string());
+                    self.toast(said);
+                }
+                let refused: Vec<(String, crate::group_admin::Refusal)> = added
+                    .refused
+                    .iter()
+                    .map(|(id, why)| (self.display_name(id), *why))
+                    .collect();
+                for said in crate::group_admin::refused_messages(self.locale, &refused) {
+                    self.toast(said);
+                }
+            }
+            Err(failure) => {
+                if waiting && let Some(draft) = self.new_group.as_mut() {
                     draft.creating = false;
                 }
                 if live {
