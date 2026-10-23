@@ -2822,6 +2822,20 @@ impl App {
             && !self.settings.chat_lock_hint_dismissed
     }
 
+    /// A person never written to, left out of the list as on the phone. One
+    /// the reader kept (pinned, a favorite, labeled, unread, locked, or with
+    /// an unsent draft) stays listed.
+    fn unlisted_stranger(&self, chat: &Chat) -> bool {
+        chat.kind == crate::model::ChatKind::Direct
+            && chat.never_messaged()
+            && !chat.pinned
+            && !chat.favorite
+            && !chat.looks_unread()
+            && chat.labels.is_empty()
+            && !chat.locked
+            && !self.has_draft(&chat.id)
+    }
+
     /// Visible chats filtered by search, archive state, and the chat filter,
     /// with pinned chats first.
     /// Locked chats only appear inside the locked folder.
@@ -2834,6 +2848,13 @@ impl App {
             .iter()
             .filter(|chat| chat.locked == locked)
             .filter(|chat| locked || chat.archived == self.show_archived || !needle.is_empty())
+            // Searching still finds people never written to, and one being
+            // opened stays.
+            .filter(|chat| {
+                !needle.is_empty()
+                    || self.open_chat.as_deref() == Some(chat.id.as_str())
+                    || !self.unlisted_stranger(chat)
+            })
             .filter(|chat| match &self.label_filter {
                 // A label lists every chat wearing it, channels included,
                 // because someone put each of them there.
@@ -2925,7 +2946,7 @@ impl App {
     pub fn archived_count(&self) -> usize {
         self.chats
             .iter()
-            .filter(|chat| chat.archived && !chat.locked)
+            .filter(|chat| chat.archived && !chat.locked && !self.unlisted_stranger(chat))
             .count()
     }
 
@@ -2993,7 +3014,6 @@ impl App {
 
     /// Whether a chat holds unsent text or attachments. Editing a sent
     /// message is not a draft.
-    #[cfg(test)]
     fn has_draft(&self, chat: &str) -> bool {
         if self.open_chat.as_deref() == Some(chat) {
             (self.editing.is_none() && !self.composer.trim().is_empty()) || !self.pending.is_empty()
@@ -19930,7 +19950,10 @@ mod tests {
             favorite("1@s.whatsapp.net", "Ada", 1, 30),
             favorite("2@s.whatsapp.net", "Bob", 0, 10),
             pinned,
-            Chat::new("4@s.whatsapp.net".into(), "Dee".into()),
+            Chat {
+                last_activity: 1,
+                ..Chat::new("4@s.whatsapp.net".into(), "Dee".into())
+            },
         ];
         app.chat_filter = ChatFilter::Favorites;
         let names: Vec<&str> = app
@@ -20005,10 +20028,12 @@ mod tests {
         let mut app = app();
         let mut ada = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
         ada.unread = 1;
+        ada.last_activity = 2;
         let bob = Chat::new("2@s.whatsapp.net".into(), "Bob".into());
         app.chats = vec![ada, bob];
         let mut cy = Chat::new("3@s.whatsapp.net".into(), "Cy".into());
         cy.unread = 1;
+        cy.last_activity = 1;
         app.chats.push(cy);
         app.chat_filter = ChatFilter::Unread;
         let ctx = egui::Context::default();
@@ -20033,6 +20058,67 @@ mod tests {
         app.apply(Action::KeepUnread("2@s.whatsapp.net".into()), &ctx);
         app.apply(Action::SetChatFilter(ChatFilter::Unread), &ctx);
         assert!(app.visible_chats().is_empty());
+    }
+
+    #[test]
+    fn people_never_written_to_stay_out_of_the_list_until_searched() {
+        let mut app = app();
+        let mut ada = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
+        ada.last_activity = 10;
+        let stranger = Chat::new("2@s.whatsapp.net".into(), "Stranger".into());
+        let group = Chat::new("3@g.us".into(), "Group".into());
+        app.chats = vec![ada, stranger, group];
+        let names = |app: &App| {
+            app.visible_chats()
+                .iter()
+                .map(|chat| chat.name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&app), ["Ada", "Group"], "groups stay listed");
+        app.search = "Stran".into();
+        assert_eq!(names(&app), ["Stranger"]);
+        app.search.clear();
+        app.open_chat("2@s.whatsapp.net".into());
+        assert_eq!(names(&app), ["Ada", "Stranger", "Group"]);
+        // A draft left unsent keeps the chat listed once it is closed.
+        app.open_chat = None;
+        app.drafts.insert("2@s.whatsapp.net".into(), "hello".into());
+        assert_eq!(names(&app), ["Ada", "Stranger", "Group"]);
+    }
+
+    #[test]
+    fn strangers_the_reader_kept_stay_listed_and_counted() {
+        let mut app = app();
+        let stranger = |id: &str| Chat::new(id.into(), id.into());
+        let mut pinned = stranger("1@s.whatsapp.net");
+        pinned.pinned = true;
+        let mut favorite = stranger("2@s.whatsapp.net");
+        favorite.favorite = true;
+        let mut unread = stranger("3@s.whatsapp.net");
+        unread.unread = 1;
+        let mut locked = stranger("4@s.whatsapp.net");
+        locked.locked = true;
+        let mut labeled = stranger("6@s.whatsapp.net");
+        labeled.labels = vec!["label".into()];
+        let mut archived = stranger("5@s.whatsapp.net");
+        archived.archived = true;
+        app.chats = vec![pinned, favorite, unread, locked, labeled, archived];
+        let unlisted: Vec<bool> = app
+            .chats
+            .iter()
+            .map(|chat| app.unlisted_stranger(chat))
+            .collect();
+        assert_eq!(unlisted, [false, false, false, false, false, true]);
+        assert_eq!(
+            app.archived_count(),
+            0,
+            "Archived does not count a hidden stranger"
+        );
+        assert_eq!(
+            app.locked_count(),
+            1,
+            "the locked folder keeps a locked stranger"
+        );
     }
 
     #[test]
