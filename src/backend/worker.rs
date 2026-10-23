@@ -1463,6 +1463,30 @@ struct ParsedMessage {
     receipts: Vec<wa::UserReceipt>,
 }
 
+/// How many of a chat's newest messages are searched for one the phone has.
+const PHONE_RANGE_LOOKBACK: usize = 20;
+
+/// The range WhatsApp checks before it archives or unarchives a chat on the
+/// phone: the chat's newest message. A phone left the chat in place when
+/// the change came without one. Local call entries were never sent, so they
+/// give their time but name no message, and a message without a time is
+/// treated as none.
+fn archive_range(jid: &Jid, last: Option<&Message>) -> whatsapp_rust::SyncActionMessageRange {
+    let Some(last) = last.filter(|last| last.timestamp > 0) else {
+        return whatsapp_rust::message_range(crate::util::now(), None, Vec::new());
+    };
+    let participant = (jid.is_group() && !last.from_me)
+        .then(|| Worker::jid_of(&last.sender))
+        .flatten();
+    let key = (!last.id.starts_with(crate::model::CALL_ENTRY_PREFIX))
+        .then(|| whatsapp_rust::MessageId::new(&last.id).ok())
+        .flatten()
+        .and_then(|id| {
+            whatsapp_rust::MessageRef::new(jid, id, participant.as_ref(), last.from_me).ok()
+        });
+    whatsapp_rust::message_range(last.timestamp, None, key.map(|key| (key, last.timestamp)))
+}
+
 impl Worker {
     fn ephemeral_expiration(&self, chat: &str) -> Option<u32> {
         self.archive
@@ -1538,6 +1562,41 @@ impl Worker {
             if call(client, jid).await.is_err() {
                 log::warn!("could not synchronize a chat preference");
             }
+        });
+    }
+
+    /// The chat's newest message the phone has: a send still pending or
+    /// failed here may never have reached it.
+    fn newest_on_phone(&self, chat: &str) -> Result<Option<Message>, rusqlite::Error> {
+        Ok(self
+            .archive
+            .messages(chat, None, PHONE_RANGE_LOOKBACK)?
+            .into_iter()
+            .rev()
+            .find(|message| {
+                !(message.from_me && matches!(message.status, Delivery::Pending | Delivery::Failed))
+            }))
+    }
+
+    /// Archives or unarchives a chat on the phone, naming its newest message.
+    /// A chat whose messages cannot be read is left alone there: a range made
+    /// up without them could move it past messages the phone has.
+    fn archive_on_phone(&self, chat: &str, archived: bool) {
+        let last = match self.newest_on_phone(chat) {
+            Ok(last) => last,
+            Err(error) => {
+                log::warn!("could not read a chat to archive it on the phone: {error}");
+                return;
+            }
+        };
+        self.tell_phone(chat, move |client, jid| async move {
+            let range = Some(archive_range(&jid, last.as_ref()));
+            if archived {
+                client.chat_actions().archive_chat(&jid, range).await
+            } else {
+                client.chat_actions().unarchive_chat(&jid, range).await
+            }
+            .map_err(|error| error.to_string())
         });
     }
 
@@ -7129,14 +7188,7 @@ impl Worker {
             Command::SetArchived(chat, archived) => {
                 let _ = self.archive.set_archived(&chat, archived);
                 self.emit_chat(&chat);
-                self.tell_phone(&chat, move |client, jid| async move {
-                    if archived {
-                        client.chat_actions().archive_chat(&jid, None).await
-                    } else {
-                        client.chat_actions().unarchive_chat(&jid, None).await
-                    }
-                    .map_err(|error| error.to_string())
-                });
+                self.archive_on_phone(&chat, archived);
             }
             Command::DeleteChat(chat) => {
                 // The phone deletes first. Deleting here while offline would
@@ -7851,13 +7903,7 @@ impl Worker {
         let _ = self.archive.set_left(chat, true);
         if archive {
             let _ = self.archive.set_archived(chat, true);
-            self.tell_phone(chat, move |client, jid| async move {
-                client
-                    .chat_actions()
-                    .archive_chat(&jid, None)
-                    .await
-                    .map_err(|error| error.to_string())
-            });
+            self.archive_on_phone(chat, true);
         }
         self.emit_chat(chat);
     }
@@ -19222,6 +19268,75 @@ mod receipt_tests {
             .set_archived_at(&id, false, time.timestamp_millis() + 1)
             .unwrap();
         assert!(!worker.archive.chat(PEER).unwrap().unwrap().archived);
+    }
+
+    #[test]
+    fn archive_range_names_the_newest_message() {
+        let jid: Jid = PEER.parse().unwrap();
+        let last = incoming("newest", 300);
+        let range = archive_range(&jid, Some(&last));
+        assert_eq!(range.last_message_timestamp, Some(300));
+        assert_eq!(range.messages.len(), 1);
+        assert_eq!(range.messages[0].timestamp, Some(300));
+        assert_eq!(range.messages[0].key.id.as_deref(), Some("newest"));
+    }
+
+    #[test]
+    fn archive_range_leaves_local_call_entries_out() {
+        let jid: Jid = PEER.parse().unwrap();
+        let last = incoming(&format!("{}1", crate::model::CALL_ENTRY_PREFIX), 400);
+        let range = archive_range(&jid, Some(&last));
+        assert_eq!(range.last_message_timestamp, Some(400));
+        assert!(range.messages.is_empty());
+        let empty = archive_range(&jid, None);
+        assert!(empty.messages.is_empty());
+        assert!(empty.last_message_timestamp.is_some());
+    }
+
+    #[test]
+    fn the_archive_range_skips_sends_the_phone_never_got() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.store_message(incoming("theirs", 100), None, None);
+        worker.store_message(
+            Message {
+                status: Delivery::Failed,
+                ..own_message("failed", 200)
+            },
+            None,
+            None,
+        );
+        worker.store_message(
+            Message {
+                status: Delivery::Pending,
+                ..own_message("pending", 300)
+            },
+            None,
+            None,
+        );
+        let newest = worker.newest_on_phone(PEER).unwrap().expect("a message");
+        assert_eq!(newest.id, "theirs");
+    }
+
+    #[test]
+    fn the_archive_range_names_the_sender_in_a_group() {
+        let group: Jid = "123-456@g.us".parse().unwrap();
+        let last = Message {
+            chat: "123-456@g.us".into(),
+            sender: PEER.into(),
+            ..incoming("theirs", 100)
+        };
+        let range = archive_range(&group, Some(&last));
+        assert_eq!(range.messages.len(), 1);
+        assert_eq!(range.messages[0].key.participant.as_deref(), Some(PEER));
+        let untimed = archive_range(
+            &group,
+            Some(&Message {
+                timestamp: 0,
+                ..last
+            }),
+        );
+        assert!(untimed.messages.is_empty());
+        assert!(untimed.last_message_timestamp.is_some_and(|at| at > 0));
     }
 
     #[tokio::test]
