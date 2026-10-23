@@ -1215,9 +1215,14 @@ fn capture_frames(
                     controls.diag.counters.sent(&unit);
                     controls.diag.sent.write(&unit);
                     let len = unit.len();
+                    // The library's clock shares no origin with ours, so the capture goes over
+                    // by its age: the peer reads the time from capture to departure from it.
+                    let captured_at =
+                        whatsapp_rust::wacore::time::Instant::now() - captured.elapsed();
                     let frame = TimedVideoFrame::builder()
                         .data(unit)
                         .timestamp(clock.stamp(captured))
+                        .captured_at(captured_at)
                         .build();
                     // A full queue means the wire is behind. The frame is dropped, which leaves the
                     // peer's decoder without its reference, so the next frame sent starts afresh,
