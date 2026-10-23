@@ -808,6 +808,7 @@ pub async fn run(
         late_older: VecDeque::new(),
         older_ids_match: false,
         interactive_sending: HashMap::new(),
+        awaiting_ack: HashMap::new(),
         receipts_watch: None,
         receipts_pruned: Instant::now(),
         early: Default::default(),
@@ -1107,6 +1108,9 @@ struct Worker {
     poll_history: poll_history::Requests,
     poll_sending: HashSet<(ChatId, String)>,
     interactive_sending: HashMap<(ChatId, String), String>,
+    /// Messages we sent that WhatsApp has not acknowledged yet, by id, with
+    /// their chat: the first ack's server time replaces their local stamp.
+    awaiting_ack: HashMap<String, ChatId>,
     /// The group message whose "Message info" is open.
     receipts_watch: Option<(ChatId, String)>,
     /// When receipts that never found their message were last dropped.
@@ -1935,6 +1939,33 @@ impl Worker {
         if let Ok(Some(mut message)) = self.archive.message(chat, id) {
             self.polish(&mut message);
             self.emit(Event::MessageUpdated(Box::new(message)));
+        }
+    }
+
+    /// Moves a message we sent to the time WhatsApp's server acknowledged it.
+    /// Only the first ack with a time counts: a resend after a retry receipt
+    /// is acked again, later, and must not move the message down the chat.
+    /// An ack without a usable time leaves the message waiting for one.
+    fn server_ack(&mut self, ack: &wa_events::ServerAck) {
+        if ack.class.as_deref() != Some("message") {
+            return;
+        }
+        let Some(at) = ack.timestamp.filter(|_| ack.error.is_none()) else {
+            return;
+        };
+        let Some(chat) = self.awaiting_ack.get(&ack.id).cloned() else {
+            return;
+        };
+        match self.archive.restamp_sent(&chat, &ack.id, at.timestamp()) {
+            Ok(changed) => {
+                self.awaiting_ack.remove(&ack.id);
+                if changed {
+                    self.emit_message(&chat, &ack.id);
+                    self.emit_chat(&chat);
+                }
+            }
+            // Still awaited, so a later ack can place it.
+            Err(error) => log::warn!("could not move a sent message to the server's time: {error}"),
         }
     }
 
@@ -2770,6 +2801,8 @@ impl Worker {
         // session that comes next. Message ids are fresh per send, so an ack
         // can never match a job queued after the stop.
         self.abandon_forwards();
+        // Acks belong to the session that sent; the next one never answers.
+        self.awaiting_ack.clear();
         if let Some(handle) = self.handle.take()
             && tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
                 .await
@@ -3697,6 +3730,7 @@ impl Worker {
                 self.push_name_synced();
             }
             E::OfflineSyncCompleted(_) => self.emit_chats(),
+            E::ServerAck(ack) => self.server_ack(ack),
             _ => {}
         }
     }
@@ -4916,6 +4950,11 @@ impl Worker {
         if let Err(error) = self.archive.insert_message(&message, raw.as_deref()) {
             log::warn!("could not store a message: {error}");
             return;
+        }
+        // Only a stored message can be moved to the server's time.
+        if message.from_me && message.status == Delivery::Pending {
+            self.awaiting_ack
+                .insert(message.id.clone(), message.chat.clone());
         }
         self.retire_local_call_twins(&message);
         if existing
@@ -7626,6 +7665,10 @@ impl Worker {
                     Some(_) => Delivery::Failed,
                     None => Delivery::Sent,
                 };
+                if error.is_some() {
+                    // A failed send is never acked; a retry stores the row again.
+                    self.awaiting_ack.remove(&id);
+                }
                 let _ = self
                     .archive
                     .set_status(&chat, &id, status, crate::util::now());
@@ -8350,6 +8393,8 @@ impl Worker {
             if self.destination_writable(&job.0) {
                 return Some((id, job));
             }
+            // Never sent, so never acked.
+            self.awaiting_ack.remove(&id);
             let _ = self
                 .archive
                 .set_status(&job.0, &id, Delivery::Failed, crate::util::now());
@@ -16919,6 +16964,7 @@ mod receipt_tests {
             late_older: VecDeque::new(),
             older_ids_match: false,
             interactive_sending: HashMap::new(),
+            awaiting_ack: HashMap::new(),
             receipts_watch: None,
             receipts_pruned: Instant::now(),
             early: Default::default(),
@@ -19740,6 +19786,124 @@ mod receipt_tests {
         worker.apply_history(chunk, true);
         assert!(marked(&worker));
         assert_eq!(unread(&worker), 0);
+    }
+
+    #[test]
+    fn the_first_server_ack_restamps_our_message() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        // Our clock is ahead: the message was stamped 200 before the server answered.
+        worker.store_message(
+            Message {
+                status: Delivery::Pending,
+                ..own_message("mine", 200)
+            },
+            None,
+            None,
+        );
+        let ack = |id: &str, class: &str, at: i64| {
+            wa_events::ServerAck::builder()
+                .id(id.to_owned())
+                .class(class.to_owned())
+                .timestamp(whatsapp_rust::wacore::time::from_secs(at).unwrap())
+                .build()
+        };
+        let stamp = |worker: &Worker, id: &str| {
+            worker.archive.message(PEER, id).unwrap().unwrap().timestamp
+        };
+        worker.server_ack(&ack("mine", "message", 140));
+        assert_eq!(stamp(&worker, "mine"), 140);
+        // A resend is acked again, later; the first ack already placed it.
+        worker.server_ack(&ack("mine", "message", 500));
+        assert_eq!(stamp(&worker, "mine"), 140);
+        // An ack for another kind of stanza never moves a message.
+        worker.store_message(
+            Message {
+                status: Delivery::Pending,
+                ..own_message("other", 300)
+            },
+            None,
+            None,
+        );
+        worker.server_ack(&ack("other", "receipt", 90));
+        assert_eq!(stamp(&worker, "other"), 300);
+    }
+
+    #[test]
+    fn an_ack_without_a_time_leaves_our_message_waiting_for_one() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.store_message(
+            Message {
+                status: Delivery::Pending,
+                ..own_message("mine", 200)
+            },
+            None,
+            None,
+        );
+        let untimed = wa_events::ServerAck::builder()
+            .id("mine".to_owned())
+            .class("message".to_owned())
+            .build();
+        worker.server_ack(&untimed);
+        let timed = wa_events::ServerAck::builder()
+            .id("mine".to_owned())
+            .class("message".to_owned())
+            .timestamp(whatsapp_rust::wacore::time::from_secs(140).unwrap())
+            .build();
+        worker.server_ack(&timed);
+        assert_eq!(
+            worker
+                .archive
+                .message(PEER, "mine")
+                .unwrap()
+                .unwrap()
+                .timestamp,
+            140
+        );
+    }
+
+    #[test]
+    fn an_error_ack_leaves_our_message_at_its_time() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.store_message(
+            Message {
+                status: Delivery::Pending,
+                ..own_message("mine", 200)
+            },
+            None,
+            None,
+        );
+        let refused = wa_events::ServerAck::builder()
+            .id("mine".to_owned())
+            .class("message".to_owned())
+            .timestamp(whatsapp_rust::wacore::time::from_secs(140).unwrap())
+            .error("479".to_owned())
+            .build();
+        worker.server_ack(&refused);
+        assert_eq!(
+            worker
+                .archive
+                .message(PEER, "mine")
+                .unwrap()
+                .unwrap()
+                .timestamp,
+            200
+        );
+        // The refused ack did not drop the entry: a plain ack still places it.
+        let timed = wa_events::ServerAck::builder()
+            .id("mine".to_owned())
+            .class("message".to_owned())
+            .timestamp(whatsapp_rust::wacore::time::from_secs(140).unwrap())
+            .build();
+        worker.server_ack(&timed);
+        assert_eq!(
+            worker
+                .archive
+                .message(PEER, "mine")
+                .unwrap()
+                .unwrap()
+                .timestamp,
+            140
+        );
     }
 
     #[test]

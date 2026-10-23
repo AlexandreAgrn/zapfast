@@ -293,6 +293,10 @@ impl Conversation {
             let added = self.messages.len() - old_len;
             self.messages.rotate_right(added);
         }
+        self.sort();
+    }
+
+    fn sort(&mut self) {
         self.messages
             .sort_by_key(|message| (message.timestamp, message.history_order.unwrap_or(i64::MAX)));
     }
@@ -3517,6 +3521,7 @@ impl App {
                     }
                     self.reload_lists();
                 }
+                let mut restamped = None;
                 if let Some(conversation) = self.conversations.get_mut(&message.chat)
                     && let Some(existing) = conversation.message_mut(&message.id)
                 {
@@ -3538,6 +3543,7 @@ impl App {
                             .collect::<Vec<_>>(),
                         _ => Vec::new(),
                     };
+                    let moved = existing.timestamp != message.timestamp;
                     *existing = message;
                     for (index, state) in carousel_states.into_iter().enumerate() {
                         if let (Some(state), Some(media)) =
@@ -3559,6 +3565,15 @@ impl App {
                     {
                         motion.state = state;
                     }
+                    if moved {
+                        // Our own message, restamped with the server's time.
+                        restamped = Some(existing.chat.clone());
+                        conversation.sort();
+                    }
+                }
+                // A hidden account's events never touch the window's selection.
+                if let Some(chat) = restamped.filter(|_| !self.events_hidden) {
+                    self.order_selection(&chat);
                 }
             }
             Event::Contacts(contacts) => {
@@ -4086,7 +4101,10 @@ impl App {
             }
             Event::AccountRemoved => {}
         }
-        self.prune_selection();
+        // A hidden account's events never touch the window's selection.
+        if !self.events_hidden {
+            self.prune_selection();
+        }
     }
 
     fn prune_selection(&mut self) {
@@ -4123,6 +4141,24 @@ impl App {
             sweep.base = base;
         }
         self.selection = Some((chat, ids));
+    }
+
+    /// Puts the selected messages of `chat` back in chat order after one of
+    /// them moved, so selection actions keep following the chat.
+    fn order_selection(&mut self, chat: &str) {
+        let Some((selected, mut ids)) = self.selection.clone() else {
+            return;
+        };
+        let Some(conversation) = self.conversations.get(chat).filter(|_| selected == chat) else {
+            return;
+        };
+        ids.sort_by_key(|id| {
+            conversation
+                .messages
+                .iter()
+                .position(|message| message.id == *id)
+        });
+        self.selection = Some((selected, ids));
     }
 
     /// Updates one account's link state, discarding its drafts when it is unlinked.
@@ -18641,6 +18677,68 @@ mod tests {
         assert_eq!(ids, vec!["a", "b", "c"]);
         conversation.merge(vec![message("c", "c", 3)], false);
         assert_eq!(conversation.messages.len(), 3);
+    }
+
+    #[test]
+    fn a_restamped_message_moves_to_its_new_place() {
+        let mut app = app();
+        let (backend, events) = Backend::detached();
+        app.backend = backend;
+        let chat = "1@s.whatsapp.net";
+        let mut mine = message(chat, "mine", 200);
+        mine.from_me = true;
+        let restamped = Message {
+            timestamp: 120,
+            ..mine.clone()
+        };
+        app.conversations.entry(chat.into()).or_default().merge(
+            vec![message(chat, "a", 100), mine, message(chat, "reply", 150)],
+            false,
+        );
+        let ids = |app: &App| {
+            app.conversations[chat]
+                .messages
+                .iter()
+                .map(|m| m.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&app), ["a", "reply", "mine"]);
+        app.selection = Some((chat.into(), vec!["reply".into(), "mine".into()]));
+        // The server's time for our message arrives as an update.
+        events
+            .send(Event::MessageUpdated(Box::new(restamped)))
+            .unwrap();
+        app.handle_events();
+        assert_eq!(ids(&app), ["a", "mine", "reply"]);
+        assert_eq!(
+            app.selection.as_ref().map(|(_, ids)| ids.as_slice()),
+            Some(["mine".to_owned(), "reply".to_owned()].as_slice()),
+            "the selection follows the chat's order"
+        );
+    }
+
+    /// Events of a hidden account are checked against that account's chats,
+    /// so they must not prune the selection the window holds.
+    #[test]
+    fn a_hidden_accounts_event_keeps_the_window_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, _commands) = two_accounts(directory.path());
+        let chat = "15550003333@s.whatsapp.net";
+        app.conversations
+            .entry(chat.into())
+            .or_default()
+            .merge(vec![message(chat, "reply", 150)], false);
+        app.selection = Some((chat.into(), vec!["reply".into()]));
+        app.active = 1;
+        app.events_hidden = true;
+        app.apply_backend_event(Event::Info("Contact saved".into()), false);
+        app.events_hidden = false;
+        app.active = 0;
+        assert_eq!(
+            app.selection,
+            Some((chat.into(), vec!["reply".into()])),
+            "the window's selection survives another account's event"
+        );
     }
 
     #[test]
