@@ -203,9 +203,12 @@ protocol. These notes are for coding agents and new contributors.
   call per account; the window (`app/calls.rs`) holds one call across all
   accounts with its `AccountId`, routes call actions to that account's
   backend, and declines another account's offer while one is up.
-  Group calls are not available yet: `calls::GROUP_CALLS_ENABLED` is
-  `false` (a real test carried no media either way), and everything below
-  about them is the code behind that switch, kept compiling and tested
+  Group calls are experimental: `calls::GROUP_CALLS_ENABLED` is `true` since
+  0.20. A three-person test carried audio every way and video both ways, but
+  our video froze every few seconds, since the library sends video FEC in
+  1:1 calls only (a guessed hop-by-hop group FEC, whatsapp-rust branch
+  `voip-group-video-fec`, made the SFU drop our media altogether). The switch
+  stays, kept compiling and tested both ways
   (`calls::override_group_calls` sets it per test thread). Read it through
   `calls::group_calls_enabled()`. While it is off a group has no call
   button and no call back (`ui::conversation::callable`, `call_menu`, the

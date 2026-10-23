@@ -63,11 +63,8 @@ Feature requests can be discussed within the project's
 [product boundaries](https://github.com/crmne/zapfast/blob/main/CONTRIBUTING.md#before-opening-an-issue).
 ZapFast does not currently support:
 
-- Group calls: starting or answering them, and joining call links. ZapFast
-  says when someone is calling one of your groups, and you answer on your
-  phone. Also creating call links and screen sharing; status posts,
-  communities, publishing to channels, and group administration beyond a
-  group's name and photo (members, admins, descriptions, settings).
+- Creating call links and screen sharing; status posts, communities and
+  publishing to channels. Group calls work, as an experiment (see the guide).
 - Playing videos outside the supported H.264 MP4 format in the app; they open
   in your system player. Attachments over 64 MiB download only when you click
   them, never automatically.

@@ -1507,14 +1507,13 @@ impl std::error::Error for Cancelled {}
 /// Whether ZapFast takes part in group calls: starts them from a group's header or the Calls
 /// page, rings for them, answers them, and joins call links.
 ///
-/// Off for now: in a real test neither direction carried any media (an outgoing call was accepted
-/// by WhatsApp but rang nobody; an answered incoming one received no RTP and the peer saw it
-/// reconnecting). While it is off, a group has no call button, a call link is not joined, and an
-/// incoming group call does not take the screen: the window only says who is calling and to
-/// answer on the phone, and sends WhatsApp nothing, so the phone keeps ringing. The group call
-/// code and its tests stay in place; turning this back on is the one change that brings them back.
+/// On since 0.20, as an experiment: a three-person test carried audio every way and video both
+/// ways, though our video froze every few seconds without video FEC in group calls. Turned off, a
+/// group has no call button, a call link is not joined, and an incoming group call does not take
+/// the screen: the window only says who is calling and to answer on the phone, and sends WhatsApp
+/// nothing, so the phone keeps ringing. Both ways stay compiled and tested.
 /// Read it through [`group_calls_enabled`], which tests can override on their own thread.
-pub const GROUP_CALLS_ENABLED: bool = false;
+pub const GROUP_CALLS_ENABLED: bool = true;
 
 #[cfg(test)]
 thread_local! {

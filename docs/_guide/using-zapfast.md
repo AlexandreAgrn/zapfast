@@ -504,20 +504,15 @@ take out and your voice goes out as it is; there is nothing to switch.
 
 ### Group calls
 
-ZapFast can't take part in group calls yet. A group's header has no call
-buttons, and a group call is started and answered on your phone.
-
-When someone calls one of your groups, ZapFast does not ring or show the call
-screen. It shows a notification, and a notice in the window while it is open,
-saying who is calling which group: "Jonas is calling Rust Berlin. ZapFast
-can't join group calls yet: answer on your phone." ZapFast sends WhatsApp
-nothing about the call, so your phone keeps ringing and you can answer there.
-A muted, archived or locked group's call stays as quiet as its messages. The
-call is still filed in the group's history when it ends.
-
-A call link in a message (`call.whatsapp.com/voice/…` or `/video/…`) is not
-joined here either: clicking it says ZapFast can't join group calls yet, so
-open the link on your phone.
+Group calls are experimental. A group's header has the same call buttons as
+a person's, a call to one of your groups rings here as any call does, and a
+call link in a message (`call.whatsapp.com/voice/…` or `/video/…`) joins that
+call. Everyone hears everyone, and each person's video gets a tile of its own.
+In testing your own video, as the others see it, still stopped for a moment
+every few seconds: one-to-one calls rebuild lost video from repair packets,
+and group calls do not yet. If WhatsApp has not turned on group calls from a
+computer for your account, starting one says so: ask someone in the group to
+call it, and answer here.
 
 One call at a time: a call to another of your numbers while one is up is
 declined there. With several numbers linked, a call to a number that is not on
