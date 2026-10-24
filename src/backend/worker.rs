@@ -824,6 +824,7 @@ pub async fn run(
     worker.backfill_view_once();
     worker.backfill_motion_photos();
     worker.backfill_hd_copies();
+    worker.backfill_group_status_mentions();
     worker.backfill_interactive();
     worker.relocate_media();
     discard_attachment_staging(&worker.dirs.media_cache_dir());
@@ -2495,8 +2496,28 @@ impl Worker {
     /// Removes the HD copies of photos and videos, filed as unsupported
     /// messages before they were recognised. Their standard copies stay.
     fn backfill_hd_copies(&mut self) {
-        const KEY: &str = "hd_copies";
-        if self.archive.meta(KEY).ok().flatten().as_deref() == Some("1") {
+        self.remove_archived_unsupported("hd_copies", hd_copy, "HD copies");
+    }
+
+    /// Removes the notices that someone mentioned a group in their status,
+    /// filed as unsupported messages before they were recognised (#595).
+    fn backfill_group_status_mentions(&mut self) {
+        self.remove_archived_unsupported(
+            "group_status_mentions",
+            group_status_mention,
+            "group status mentions",
+        );
+    }
+
+    /// Removes, once (`key` records it), the archived unsupported messages
+    /// `hidden` recognises as nothing to show.
+    fn remove_archived_unsupported(
+        &mut self,
+        key: &str,
+        hidden: fn(&wa::Message) -> bool,
+        what: &str,
+    ) {
+        if self.archive.meta(key).ok().flatten().as_deref() == Some("1") {
             return;
         }
         let rows = match self.archive.unsupported_with_raw() {
@@ -2512,22 +2533,22 @@ impl Worker {
             let Ok(message) = wa::Message::decode_from_slice(&raw) else {
                 continue;
             };
-            if !hd_copy(message.get_base_message()) {
+            if !hidden(message.get_base_message()) {
                 continue;
             }
             match self.archive.delete_message(&chat, &id) {
                 Ok(_) => removed += 1,
                 Err(error) => {
-                    log::warn!("could not remove an archived HD copy: {error}");
+                    log::warn!("could not remove an archived message ({what}): {error}");
                     failed = true;
                 }
             }
         }
         if !failed {
-            let _ = self.archive.set_meta(KEY, "1");
+            let _ = self.archive.set_meta(key, "1");
         }
         if removed > 0 {
-            log::info!("removed {removed} archived HD copies");
+            log::info!("removed {removed} archived {what}");
             self.emit_chats();
         }
     }
@@ -11343,7 +11364,11 @@ fn classify_base(base: &wa::Message) -> Option<Content> {
             what: what.to_owned(),
         })
     };
-    if base.album_message.is_set() || motion_photo_child(base) || hd_copy(base) {
+    if base.album_message.is_set()
+        || motion_photo_child(base)
+        || hd_copy(base)
+        || group_status_mention(base)
+    {
         return None;
     }
     if base.group_invite_message.is_set() {
@@ -11443,6 +11468,13 @@ fn motion_photo_child(base: &wa::Message) -> bool {
             .and_then(|video| video.context_info.as_option())
             .and_then(|context| context.paired_media_type)
             == Some(PairedMediaType::MOTION_PHOTO_CHILD)
+}
+
+/// Whether `base` is the notice that someone mentioned this group in their
+/// status. The phone and WhatsApp for Mac show no message for it in the
+/// group, and its status is not something a linked device can open (#595).
+fn group_status_mention(base: &wa::Message) -> bool {
+    base.group_status_mention_message.is_set()
 }
 
 /// Whether `base` carries the HD copy of a photo or video that was also sent
@@ -14458,6 +14490,19 @@ mod tests {
             classify(&child(AssociationType::MEDIA_ALBUM)),
             Some(Content::Unsupported { .. })
         ));
+    }
+
+    /// Someone mentioning the group in their status sends the group a notice
+    /// the phone shows no message for, so it is not one here either (#595).
+    #[test]
+    fn a_group_status_mention_is_not_a_message() {
+        let mut proto = wa::Message::default();
+        proto.group_status_mention_message = MessageField::some({
+            let mut proto = wa::message::FutureProofMessage::default();
+            proto.message = MessageField::some(wa::Message::default());
+            proto
+        });
+        assert_eq!(classify(&proto), None);
     }
 
     #[test]
