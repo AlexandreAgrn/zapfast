@@ -30,3 +30,5 @@ src/ui/rail.rs
 src/ui/mod.rs
 src/ui/new_group.rs
 src/group_admin.rs
+src/ui/polls.rs
+src/ui/update.rs
