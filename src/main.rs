@@ -436,10 +436,13 @@ fn run() -> eframe::Result<()> {
             // with. Demo runs keep their fixed screenshot size.
             // Decided as each window is made: it cannot become transparent
             // later.
-            let transparent =
-                zapfast::backdrop::transparent_window(lease.peek(|app: &app::App| {
-                    app.settings.theme == zapfast::settings::ThemeChoice::Messages
-                }));
+            let transparent = lease.peek(|app: &app::App| {
+                zapfast::backdrop::transparent_window(
+                    app.settings.theme == zapfast::settings::ThemeChoice::Messages,
+                    app.palette.window.a() < 255,
+                )
+            });
+            zapfast::backdrop::set_window_transparent(transparent);
             let geometry = if demo_persistence.is_some() {
                 fastframe_shell::window::Geometry::default()
             } else {
@@ -722,7 +725,7 @@ impl eframe::App for Shell {
         if zapfast::backdrop::active() {
             [0.0; 4]
         } else {
-            self.app.palette.window.to_normalized_gamma_f32()
+            zapfast::backdrop::clear_color(self.app.palette.window).to_normalized_gamma_f32()
         }
     }
 
