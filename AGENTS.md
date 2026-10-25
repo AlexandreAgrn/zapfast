@@ -9,6 +9,9 @@ protocol. These notes are for coding agents and new contributors.
 - Keep it a small native client. No browser engine, no telemetry, no
   hosted backend, no ZapFast-operated account system. Features never send
   message content to a third party.
+- WhatsApp only. ZapFast is a client for WhatsApp accounts and will not
+  speak other networks or protocols (Matrix, Signal, Telegram, IRC, XMPP)
+  or bridge to them.
 - No automation, ever. ZapFast is for a person reading and writing their
   own chats by hand. It will not have bots, an MCP server, or any API,
   command-line, plugin or scripting interface that reads, exports or sends
