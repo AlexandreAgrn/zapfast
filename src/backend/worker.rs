@@ -568,6 +568,42 @@ async fn receipts_allowed(
     }
 }
 
+/// Whether a played receipt for a direct message goes out. With read
+/// receipts on it goes to the sender. With them off WhatsApp still tells our
+/// own devices, as `played-self`, so the phone stops marking the voice message
+/// unheard (#501); whatsapp-rust sends that form when it knows they are off
+/// (`library_hides`). While it does not know yet, nothing goes, so the sender
+/// never learns of a play the account hides.
+fn played_receipt_goes(account_allows: bool, library_hides: bool) -> bool {
+    account_allows || library_hides
+}
+
+/// Like `receipts_allowed`, for a played receipt: see `played_receipt_goes`.
+async fn played_receipt_allowed(
+    client: &Client,
+    jid: &Jid,
+    commands: &mpsc::UnboundedSender<Command>,
+) -> bool {
+    if jid.is_group() {
+        return true;
+    }
+    match client.fetch_privacy_settings().await {
+        Ok(settings) => {
+            let allowed = account_allows_receipts(&settings);
+            let _ = commands.send(Command::ReceiptsPrivacy { disabled: !allowed });
+            let hides = client
+                .persistence_manager()
+                .get_device_snapshot()
+                .read_receipts_disabled;
+            played_receipt_goes(allowed, hides)
+        }
+        Err(error) => {
+            log::debug!("played receipt withheld: account privacy unavailable: {error}");
+            false
+        }
+    }
+}
+
 /// A sticker file's size and modification time, with the emojis read from it.
 type EmojiStamp = ((u64, Option<std::time::SystemTime>), Vec<String>);
 
@@ -10416,7 +10452,7 @@ impl Worker {
         };
         let commands = self.commands.clone();
         tokio::spawn(async move {
-            if !receipts_allowed(&client, &jid, &commands).await {
+            if !played_receipt_allowed(&client, &jid, &commands).await {
                 return;
             }
             if let Err(error) = client
@@ -13251,6 +13287,17 @@ mod tests {
         for document in ["take.wav", "album.flac", "loop.aiff", "old.wma", "x.weba"] {
             assert_eq!(sent_as(document), None, "{document}");
         }
+    }
+
+    #[test]
+    fn a_played_receipt_reaches_our_own_devices_with_read_receipts_off() {
+        // Read receipts on: the sender is told.
+        assert!(played_receipt_goes(true, false));
+        // Off, and whatsapp-rust knows: it sends played-self, to our own
+        // devices only, so the phone marks the message heard (#501).
+        assert!(played_receipt_goes(false, true));
+        // Off, but the library does not know yet: it would tell the sender.
+        assert!(!played_receipt_goes(false, false));
     }
 
     #[test]
