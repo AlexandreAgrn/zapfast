@@ -462,7 +462,9 @@ speed. The first play sends
 a played receipt, so your phone marks the voice message as heard. With read
 receipts off in your account privacy, the receipt goes only to your own
 devices and the sender is not told. With **Send read receipts** off in
-ZapFast's settings, no played receipt is sent. When the composer is empty, the send button becomes a
+ZapFast's settings, no played receipt is sent. A voice message you have not
+heard yet shows a dot beside its length; it goes away once you play it here or
+on another device. When the composer is empty, the send button becomes a
 microphone. The light beside the time turns red, and the time starts, once the
 microphone delivers sound: one the system had put to sleep can take a moment to
 wake, and anything said before then is not recorded. Press Enter or the send
