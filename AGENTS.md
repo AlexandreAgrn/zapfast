@@ -37,6 +37,16 @@ protocol. These notes are for coding agents and new contributors.
 - The protocol comes from whatsapp-rust. Do not reimplement pieces of it
   here, and do not advertise a capability merely because a protobuf field
   for it exists.
+- Nothing ships for one platform only. A feature or theme works on Linux,
+  Windows and macOS, through each platform's own mechanism where they differ
+  and a sensible fallback where one lacks it.
+- Fewer settings. Prefer a good default to a new setting, and never add a
+  setting per preference; a change that needs a new setting needs the
+  maintainer's approval first.
+- Pull requests leave the translation template and catalogs
+  (`assets/i18n/`) alone unless the change is a translation itself: the
+  maintainer regenerates them on `main`, and regenerated catalogs bury the
+  real change and conflict with every other pull request.
 - Do not broaden a task into adjacent features or a general refactor.
   Preserve existing user behaviour unless the task changes it.
 - Current limitations are not product exclusions. Before marking a report
