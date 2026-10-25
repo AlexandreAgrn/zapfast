@@ -516,6 +516,11 @@ pub enum Command {
     FirstNamesRecovered {
         complete: bool,
     },
+    /// Internal: the one-time replay of the phone's stars, for those made
+    /// before ZapFast followed them, finished.
+    StarsRecovered {
+        complete: bool,
+    },
     /// Internal: a favorite from the phone finished downloading.
     FavoriteFetched {
         hash: String,
