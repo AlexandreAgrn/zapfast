@@ -15178,6 +15178,102 @@ mod tests {
         assert!(!button_disabled(&mut app, &ctx, "Save contact"));
     }
 
+    /// The chat list's menu offers Mute as one submenu, with WhatsApp's
+    /// choices of how long; a muted chat offers Unmute alone.
+    #[test]
+    fn the_chat_menu_mutes_through_a_submenu() {
+        fn texts(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.text().to_owned(),
+                    text.galley.rect.translate(text.pos.to_vec2()),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| texts(shape, out)),
+                _ => {}
+            }
+        }
+        let drawn = |shapes: &[egui::epaint::ClippedShape]| {
+            let mut out = Vec::new();
+            for clipped in shapes {
+                texts(&clipped.shape, &mut out);
+            }
+            out
+        };
+        let find = |shapes: &[egui::epaint::ClippedShape], label: &str| {
+            drawn(shapes)
+                .into_iter()
+                .find(|(text, _)| text == label)
+                .map(|(_, rect)| rect)
+        };
+        let click = |pos| {
+            [true, false].map(|pressed| egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: egui::Modifiers::NONE,
+            })
+        };
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        render(&mut app, &ctx);
+        let chat = sample_ids()[0].to_owned();
+        app.open_chat_menu = Some(chat.clone());
+        let mut shapes = Vec::new();
+        for _ in 0..3 {
+            shapes = frame_sized(&mut app, &ctx, 780.0, Vec::new());
+        }
+        for old in [
+            "Mute for 8 hours",
+            "Mute for a week",
+            "Mute indefinitely",
+            "Unmute",
+        ] {
+            assert!(find(&shapes, old).is_none(), "{old} is not a menu row");
+        }
+        let mute = find(&shapes, "Mute").expect("the menu has a Mute row");
+        for _ in 0..4 {
+            shapes = frame_sized(
+                &mut app,
+                &ctx,
+                780.0,
+                vec![egui::Event::PointerMoved(mute.center())],
+            );
+        }
+        for choice in ["8 hours", "1 week"] {
+            assert!(
+                find(&shapes, choice).is_some(),
+                "the submenu offers {choice}"
+            );
+        }
+        let always = find(&shapes, "Always").expect("the submenu offers Always");
+        app.actions.clear();
+        let [press, release] = click(always.center());
+        frame_sized(
+            &mut app,
+            &ctx,
+            780.0,
+            vec![egui::Event::PointerMoved(always.center()), press],
+        );
+        frame_sized(&mut app, &ctx, 780.0, vec![release]);
+        let now = crate::util::now();
+        assert!(
+            app.chat(&chat).expect("chat").muted(now),
+            "Always mutes the chat"
+        );
+
+        // Muted, the menu offers Unmute alone.
+        app.open_chat_menu = Some(chat.clone());
+        for _ in 0..3 {
+            shapes = frame_sized(&mut app, &ctx, 780.0, Vec::new());
+        }
+        assert!(
+            find(&shapes, "Unmute").is_some(),
+            "a muted chat offers Unmute"
+        );
+        assert!(find(&shapes, "Mute").is_none(), "and no Mute submenu");
+    }
+
     #[test]
     fn muting_a_chat_takes_effect_at_once() {
         let mut app = app();
