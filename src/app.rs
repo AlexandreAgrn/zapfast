@@ -6816,6 +6816,37 @@ impl App {
                     message,
                 });
             }
+            Action::UnreadableMedia {
+                chat,
+                message,
+                path,
+            } => {
+                // The file may come back under the same name, which must be
+                // decoded afresh rather than answered with this failure.
+                crate::animation::forget(ctx, &path);
+                crate::image_cache::forget(ctx, &crate::util::image_uri(&path));
+                let Some(media) = self
+                    .conversations
+                    .get_mut(&chat)
+                    .and_then(|conversation| conversation.message_mut(&message))
+                    .and_then(|message| message.content.media_at_mut(None))
+                    .filter(|media| media.path.as_ref() == Some(&path))
+                else {
+                    return;
+                };
+                media.path = None;
+                if path.is_file() {
+                    // A file that does not decode is not fetched again on its
+                    // own, or one that never decodes would download forever:
+                    // the bubble offers the retry, as a failed download does.
+                    log::warn!("a downloaded attachment could not be displayed");
+                    media.state = MediaState::Failed("ZapFast could not display this file".into());
+                } else if !matches!(media.state, MediaState::Downloading) {
+                    // Gone from the disk: it downloads again like any
+                    // attachment that was never downloaded.
+                    media.state = MediaState::Idle;
+                }
+            }
             Action::PreviewImage {
                 path,
                 chat,

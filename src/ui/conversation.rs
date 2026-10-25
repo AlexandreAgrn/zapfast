@@ -8739,6 +8739,7 @@ fn picture(
                 media.height.unwrap_or(180) as f32,
             );
             let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+            let mut unreadable = false;
             if ui.is_rect_visible(rect) {
                 match animation::frame(ui, path, rect, view.animate && response.hovered()) {
                     animation::Frame::Ready(texture) => {
@@ -8749,13 +8750,18 @@ fn picture(
                             Color32::WHITE,
                         );
                     }
-                    _ => {
+                    frame => {
                         ui.painter().rect_filled(rect, radius, palette.surface);
                         theme::paint_icon(ui, Icon::Sticker, rect, 32.0, palette.secondary);
+                        // A file that is gone or does not decode would stay
+                        // this placeholder for good (#603).
+                        unreadable = matches!(frame, animation::Frame::Unavailable);
                     }
                 }
             }
-            if response
+            if unreadable {
+                actions.push(unreadable_media(view, message, path));
+            } else if response
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
@@ -8836,12 +8842,29 @@ fn picture(
                 }
                 rect
             }
+            Err(_) if sticker.is_some() || !path.is_file() => {
+                // A sticker has nothing else to open it with, and a file that
+                // is gone has nothing to open: the bubble downloads it again,
+                // or offers to, instead of drawing a dead picture (#603).
+                let size = drawn.map_or_else(
+                    || {
+                        if sticker.is_some() {
+                            Vec2::splat(STICKER_SIDE)
+                        } else {
+                            frame_size(media, None, max_width, max_height)
+                        }
+                    },
+                    fit,
+                );
+                let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                if ui.is_rect_visible(rect) {
+                    ui.painter().rect_filled(rect, radius, palette.surface);
+                }
+                actions.push(unreadable_media(view, message, path));
+                rect
+            }
             Err(_) => {
-                let size = if sticker.is_some() {
-                    Vec2::splat(STICKER_SIDE)
-                } else {
-                    frame_size(media, None, max_width, max_height)
-                };
+                let size = frame_size(media, None, max_width, max_height);
                 let (rect, response) = ui.allocate_exact_size(size, Sense::click());
                 if ui.is_rect_visible(rect) {
                     ui.painter().rect_filled(rect, radius, palette.surface);
@@ -8943,6 +8966,16 @@ fn picture(
         });
     }
     rect
+}
+
+/// Reports a downloaded picture or sticker that could not be drawn, so the app
+/// forgets its file and downloads it again or offers a retry.
+fn unreadable_media(view: &View<'_>, message: &Message, path: &Path) -> Action {
+    Action::UnreadableMedia {
+        chat: view.chat.id.clone(),
+        message: message.id.clone(),
+        path: path.to_path_buf(),
+    }
 }
 
 /// Draws a motion photo's badge in the corner of its picture, and its clip

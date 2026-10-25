@@ -2624,6 +2624,14 @@ pub enum Action {
         chat: ChatId,
         message: String,
     },
+    /// A downloaded picture or sticker at `path` could not be drawn: its file
+    /// is gone, and it downloads again like any other attachment, or it does
+    /// not decode, and its bubble offers a retry.
+    UnreadableMedia {
+        chat: ChatId,
+        message: String,
+        path: PathBuf,
+    },
     /// Downloads a motion photo's clip.
     DownloadMotion {
         chat: ChatId,

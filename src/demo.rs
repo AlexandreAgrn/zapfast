@@ -11060,6 +11060,208 @@ mod tests {
         );
     }
 
+    /// The demo app with the sender of its account's events, and the open
+    /// chat's sticker moved to the bottom, where it is drawn, with its file
+    /// at `file`.
+    fn unreadable_sticker(
+        file: &str,
+        animated: bool,
+    ) -> (
+        App,
+        egui::Context,
+        std::sync::mpsc::Sender<crate::backend::Event>,
+        std::path::PathBuf,
+    ) {
+        let root = tempfile::Builder::new()
+            .prefix("zapfast-demo-")
+            .tempdir()
+            .unwrap();
+        let (mut app, events) = App::headless(AppDirs::under(root.path()), Settings::default());
+        ROOTS.with(|roots| roots.borrow_mut().push(root));
+        populate(&mut app);
+        let path = app.dirs.media_cache_dir().join(file);
+        let chat = app.open_chat.clone().unwrap();
+        let messages = &mut app.conversations.get_mut(&chat).unwrap().messages;
+        let at = messages
+            .iter()
+            .position(|row| row.id == "ada-sticker")
+            .expect("the sample has a sticker");
+        let mut row = messages.remove(at);
+        row.timestamp = messages.last().map_or(0, |last| last.timestamp) + 1;
+        if let Content::Sticker {
+            media,
+            animated: flag,
+        } = &mut row.content
+        {
+            media.path = Some(path.clone());
+            *flag = animated;
+        }
+        messages.push(row);
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        app.backend.record_demo_commands();
+        (app, ctx, events, path)
+    }
+
+    fn sticker_media(app: &App) -> crate::model::Media {
+        let chat = app.open_chat.clone().unwrap();
+        app.conversations[&chat]
+            .messages
+            .iter()
+            .find(|row| row.id == "ada-sticker")
+            .and_then(|row| row.content.media().cloned())
+            .expect("the sticker is loaded")
+    }
+
+    /// Renders until `done`, collecting the sticker's download commands as
+    /// their `manual` flags.
+    fn render_until(
+        app: &mut App,
+        ctx: &egui::Context,
+        downloads: &mut Vec<bool>,
+        done: impl Fn(&App, &[bool]) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            render(app, ctx);
+            downloads.extend(
+                app.backend
+                    .take_demo_commands()
+                    .iter()
+                    .filter_map(|command| match command {
+                        crate::backend::Command::Download {
+                            message, manual, ..
+                        } if message == "ada-sticker" => Some(*manual),
+                        _ => None,
+                    }),
+            );
+            if done(app, downloads) {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// A sticker whose file was deleted is forgotten and downloads again on
+    /// its own, instead of staying a blank placeholder (#603).
+    #[test]
+    fn a_sticker_whose_file_is_gone_downloads_again() {
+        for animated in [true, false] {
+            let (mut app, ctx, _events, _path) = unreadable_sticker("gone.webp", animated);
+            let mut downloads = Vec::new();
+            assert!(
+                render_until(&mut app, &ctx, &mut downloads, |_, downloads| {
+                    !downloads.is_empty()
+                }),
+                "animated: {animated}: the sticker downloads again"
+            );
+            assert_eq!(downloads, [false], "animated: {animated}");
+            let media = sticker_media(&app);
+            assert_eq!(media.path, None, "animated: {animated}");
+            assert!(
+                matches!(media.state, crate::model::MediaState::Downloading),
+                "animated: {animated}: {:?}",
+                media.state
+            );
+        }
+    }
+
+    /// A sticker whose file does not decode shows the failed state and
+    /// downloads again only when clicked: a fresh copy that still does not
+    /// decode stays failed rather than downloading forever, and one that
+    /// decodes is drawn, not answered with the earlier failure (#603).
+    #[test]
+    fn a_sticker_that_does_not_decode_retries_only_when_clicked() {
+        for animated in [true, false] {
+            let (mut app, ctx, events, path) = unreadable_sticker("broken.webp", animated);
+            std::fs::write(&path, b"not a sticker").unwrap();
+            let chat = app.open_chat.clone().unwrap();
+            let failed = |app: &App, _: &[bool]| {
+                matches!(
+                    sticker_media(app).state,
+                    crate::model::MediaState::Failed(_)
+                )
+            };
+            let click = |app: &mut App, downloads: &mut Vec<bool>| {
+                let pos = bubble_rect(&ctx, &chat, "ada-sticker")
+                    .expect("the sticker is drawn")
+                    .center();
+                for pressed in [true, false] {
+                    frame_with(
+                        app,
+                        &ctx,
+                        vec![
+                            egui::Event::PointerMoved(pos),
+                            egui::Event::PointerButton {
+                                pos,
+                                pressed,
+                                button: egui::PointerButton::Primary,
+                                modifiers: egui::Modifiers::NONE,
+                            },
+                        ],
+                    );
+                }
+                assert!(
+                    render_until(app, &ctx, downloads, |_, downloads| !downloads.is_empty()),
+                    "animated: {animated}: the click downloads it again"
+                );
+                assert_eq!(*downloads, [true], "animated: {animated}");
+                assert!(app.sticker_view.is_none(), "the click is not a preview");
+                downloads.clear();
+            };
+            let arrives = |events: &std::sync::mpsc::Sender<crate::backend::Event>| {
+                events
+                    .send(crate::backend::Event::Media {
+                        card: None,
+                        chat: chat.clone(),
+                        message: "ada-sticker".into(),
+                        result: Ok(path.clone()),
+                    })
+                    .unwrap();
+            };
+            let mut downloads = Vec::new();
+            for attempt in 0..2 {
+                assert!(
+                    render_until(&mut app, &ctx, &mut downloads, failed),
+                    "animated: {animated}, attempt {attempt}: the bubble shows the failure"
+                );
+                assert_eq!(sticker_media(&app).path, None);
+                // Settled: no download starts by itself.
+                let settled = std::time::Instant::now() + std::time::Duration::from_millis(200);
+                render_until(&mut app, &ctx, &mut downloads, |_, _| {
+                    std::time::Instant::now() > settled
+                });
+                assert!(
+                    downloads.is_empty(),
+                    "animated: {animated}, attempt {attempt}: no automatic download"
+                );
+                click(&mut app, &mut downloads);
+                if attempt == 0 {
+                    // The same file arrives again, and still does not decode.
+                    arrives(&events);
+                }
+            }
+            // This time a good copy arrives under the same name.
+            std::fs::write(&path, stock::ANIMATED_STICKER).unwrap();
+            arrives(&events);
+            let shown = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            render_until(&mut app, &ctx, &mut downloads, |app, _| {
+                sticker_media(app).path.is_none() || std::time::Instant::now() > shown
+            });
+            let media = sticker_media(&app);
+            assert_eq!(media.path.as_ref(), Some(&path), "animated: {animated}");
+            assert!(
+                matches!(media.state, crate::model::MediaState::Idle),
+                "animated: {animated}: {:?}",
+                media.state
+            );
+            assert!(downloads.is_empty());
+        }
+    }
+
     /// The viewer steps through an animated sticker's frames on its own.
     #[test]
     fn an_animated_sticker_plays_in_the_viewer() {
@@ -13321,9 +13523,10 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let chat = sample_ids()[0].to_owned();
-        let path = std::path::PathBuf::from("demo/photo.jpg");
         for downloaded in [true, false] {
             let mut app = app();
+            // A real file: a path whose file is gone downloads again instead.
+            let (path, _) = sample_files(&app);
             app.attach(&ctx);
             app.backend.record_demo_commands();
             let mut photo = media("image/jpeg", 120_000, Some(800), Some(600));

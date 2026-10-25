@@ -289,6 +289,15 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect, animate: bool) -> Fra
     }
 }
 
+/// Forgets what is known of `path`, a failure included, so the file there is
+/// decoded afresh the next time it is drawn.
+pub fn forget(ctx: &egui::Context, path: &Path) {
+    let cache = cache(ctx);
+    let mut animations = cache.0.lock().unwrap_or_else(|p| p.into_inner());
+    animations.entries.remove(path);
+    animations.idle.remove(path);
+}
+
 /// Whether a decoder thread could be started.
 enum Start {
     Started,
