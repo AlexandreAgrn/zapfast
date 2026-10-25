@@ -665,6 +665,11 @@ protocol. These notes are for coding agents and new contributors.
   History `MESSAGE_EDIT` entries carry full snapshots, unlike live edit events:
   keep their envelope timestamp/order and normalize the body and target id.
   Do not require a separate original or create a bubble under the edit id.
+  An edit made before linking can arrive as a `secretEncryptedMessage`
+  MESSAGE_EDIT: `parse_conversation` files it as a `SealedEdit` under the
+  original's id, and the worker opens it with the original's secret (the
+  chunk's, the archive's, or the entry's own) before filing the snapshot;
+  one it cannot open is not filed.
   Count-only diagnostics can distinguish malformed snapshots from storage failures.
 - Scrolling comes from fastframe-scroll: `App::scrolling.apply` runs first
   in each unlocked frame and sets the wheel step (120 points a notch), and on
