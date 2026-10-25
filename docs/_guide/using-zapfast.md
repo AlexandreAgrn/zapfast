@@ -240,6 +240,12 @@ instead. The files you select there go as documents with their own name and
 bytes, pictures included, and show as files above the composer until you send
 them.
 
+Videos go as playable video messages only when they are MP4. WhatsApp does
+not deliver a video message in another format, and ZapFast does not convert
+videos, so a QuickTime `.mov`, WebM, MKV, or AVI file goes as a document
+instead and arrives as the original file. Audio works the same way: MP3, M4A,
+AAC, AMR, and OGG go as audio messages, other formats as documents.
+
 Staged attachments stay with their chat, along with their caption and reply,
 when you switch chats or accounts, and come back when you return. Unlike text
 drafts, they are kept only while ZapFast runs. A refused attachment send goes

@@ -11747,6 +11747,15 @@ fn whatsapp_audio_mime(mime: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether an attached video goes as a video message. Phones play only MP4
+/// inline, and WhatsApp drops a video message in another container (a
+/// QuickTime `.mov`, WebM, MKV, AVI) without telling either side, so the
+/// recipient gets nothing (#553). Those go as documents and arrive as the
+/// original file; ZapFast does not transcode.
+fn whatsapp_video_mime(mime: &str) -> bool {
+    mime == "video/mp4"
+}
+
 /// Uploads a file and builds its message. Images are encoded as JPEG.
 async fn prepare_media(
     client: &Client,
@@ -11755,7 +11764,6 @@ async fn prepare_media(
     file_name: Option<&str>,
     gif: bool,
 ) -> Result<Prepared, String> {
-    let kind = mime.split('/').next().unwrap_or_default();
     let is_picture = matches!(
         mime,
         "image/jpeg" | "image/png" | "image/webp" | "image/bmp" | "image/tiff"
@@ -11807,7 +11815,7 @@ async fn prepare_media(
     }
     let size = bytes.len() as u64;
     let mime_owned = mime.to_owned();
-    if kind == "video" {
+    if whatsapp_video_mime(mime) {
         // The picture, size, and length phones show before downloading it.
         // Reading a second of frames takes a moment, so off the runtime.
         let poster = {
@@ -13042,6 +13050,22 @@ mod tests {
         // phone, not as the file that was attached (#162).
         for document in ["take.wav", "album.flac", "loop.aiff", "old.wma", "x.weba"] {
             assert_eq!(sent_as(document), None, "{document}");
+        }
+    }
+
+    #[test]
+    fn only_mp4_video_is_sent_as_a_video_message() {
+        let video = |name: &str| {
+            let mime = mime_guess2::from_path(name)
+                .first_or_octet_stream()
+                .to_string();
+            whatsapp_video_mime(&mime)
+        };
+        assert!(video("clip.mp4"));
+        // WhatsApp drops these as video messages, so the recipient got
+        // nothing (#553); they go as documents instead.
+        for document in ["clip.mov", "clip.webm", "clip.mkv", "clip.avi", "clip.wmv"] {
+            assert!(!video(document), "{document}");
         }
     }
 
