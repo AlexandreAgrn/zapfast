@@ -92,10 +92,10 @@ native-packages build \
 Secret configuration applies to future builds. Existing published DMGs retain
 their original signatures; this setup does not replace release assets.
 
-Linux releases build on Ubuntu 24.04, so the binaries need glibc 2.39 or newer
-and the packages install on Ubuntu 24.04 and Debian 13 onwards: 22.04's
-libpipewire is older than the 0.3.53 fastframe-audio's PipeWire output builds
-against. native-packages derives the `libc6`/`glibc` floor from the binary; do
+Linux releases build in a Debian 12 container, so the binaries need glibc 2.36
+or newer and the packages install on Debian 12, Ubuntu 22.10 and Fedora 37
+onwards. Ubuntu 22.04 is not supported: its libpipewire is older than the
+0.3.53 fastframe-audio's PipeWire output builds against. native-packages derives the `libc6`/`glibc` floor from the binary; do
 not declare one. DEB/RPM recipes declare runtime-loaded Wayland, X11 and EGL
 libraries as well as ALSA (`libasound2t64 | libasound2`, the package's name
 before and after the 64-bit time transition) and libpipewire

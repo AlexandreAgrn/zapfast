@@ -37,20 +37,24 @@ jobs:
       id-token: write
       attestations: write
     runs-on: ${{ matrix.os }}
+    # Linux builds run in Debian 12: the binary needs the glibc it was built
+    # against or newer (2.36), and bookworm's libpipewire (0.3.65) meets the
+    # PipeWire output's 0.3.53, which Ubuntu 22.04's does not. The packages
+    # install on Debian 12, Ubuntu 22.10, Fedora 37 and newer. Windows rows
+    # leave it empty and run on the host.
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # The oldest supported Ubuntu: the binary needs the glibc it was
-          # built against or newer (2.39), so the packages install on
-          # Ubuntu 24.04 and Debian 13 and newer. 22.04's libpipewire is too
-          # old for the PipeWire output.
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            container: debian:12
           # A native arm64 runner, so the GUI's system libraries need no
           # cross-compilation sysroot.
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            container: debian:12
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           # Cross-compiled from x64: the MSVC arm64 linker ships with the
@@ -58,6 +62,16 @@ jobs:
           - os: windows-latest
             target: aarch64-pc-windows-msvc
     steps:
+      # Before checkout and rustup: the bare image has no curl, git or
+      # certificates. Steps run as root, without sudo.
+      - name: GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
+            libpipewire-0.3-dev clang libclang-dev cmake perl
       - uses: actions/checkout@v7
       - name: Check release version
         shell: bash
@@ -70,11 +84,6 @@ jobs:
       # The repository pins its toolchain; add the cross-target's standard
       # library to the toolchain the pin actually resolves to.
       - run: rustup target add ${{ matrix.target }}
-      - name: GUI build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev libpipewire-0.3-dev clang libclang-dev cmake perl
       # No compiler cache: published binaries never build from outputs
       # restored from an Actions cache.
       - run: cargo build --locked --release --target ${{ matrix.target }}

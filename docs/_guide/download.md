@@ -52,7 +52,7 @@ the new file when {{ app }} says a release is out.
 - [{{ name }}-{{ v }}-x86_64.AppImage]({{ base }}/{{ name }}-{{ v }}-x86_64.AppImage)
 - [{{ name }}-{{ v }}-aarch64.AppImage]({{ base }}/{{ name }}-{{ v }}-aarch64.AppImage)
 
-{{ app }} needs glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 and
+{{ app }} needs glibc 2.36 or newer (Debian 12, Ubuntu 22.10, Fedora 37 and
 newer), the standard egui libraries, ALSA and libpipewire 0.3.53 or newer:
 `libglvnd`, `libxkbcommon`, `wayland`, `libx11`, `alsa-lib` and `libpipewire` (on
 Debian or Ubuntu: `libasound2t64`, `libpipewire-0.3-0t64`, `libgl1`,

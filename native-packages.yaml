@@ -52,7 +52,7 @@ nfpm:
     file_info:
       mode: 493
   # native-packages adds the C library (libc6, glibc) at the version the
-  # binary needs: 2.39, as the release builds run on Ubuntu 24.04.
+  # binary needs: 2.36, as the release builds run in Debian 12.
   overrides:
     deb:
       depends:

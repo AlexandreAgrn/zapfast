@@ -124,6 +124,26 @@ jobs:
           name: macos-preview
           path: ${{ runner.temp }}/zapfast-*.png
 
+  # Linux releases build in Debian 12 for its older glibc (release.yml).
+  # Building here too catches a dependency that needs newer system
+  # libraries before a release tag does.
+  debian-12:
+    name: compile (Debian 12)
+    runs-on: ubuntu-latest
+    container: debian:12
+    timeout-minutes: 45
+    steps:
+      - name: GUI build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
+            libpipewire-0.3-dev clang libclang-dev cmake perl
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked
+
   windows-arm64:
     name: compile (Windows arm64)
     runs-on: windows-latest
